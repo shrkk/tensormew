@@ -548,7 +548,8 @@ def sampled_eval_main(args) -> int:
         net.eval()
         net.vision_trunk = net.vision_trunk.to(memory_format=torch.channels_last)   # ~30 % faster CPU inference
     ecfg = worker_env_cfg(cfg, None, None, None)
-    ecfg.update({"stagger_episodes": False, "episode_len_jitter": 0.0, "seed": args.seed})
+    # Evaluation always starts from the base state: the training-only agent-earned frontier archive must never be used here.
+    ecfg.update({"stagger_episodes": False, "episode_len_jitter": 0.0, "seed": args.seed, "frontier_prob": 0.0})
     worker = EnvWorker(0, [args.start_state], args.max_steps, ecfg)
     episodes = []
     import hashlib

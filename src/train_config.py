@@ -114,6 +114,12 @@ class TrainConfig:
     # Cross-episode (global) novelty: the curiosity term and the first-visit tile bonus use visit counts that persist across
     # episodes (per worker) instead of being reset every episode, so familiar dead ends stop paying.  Default off.
     global_novelty: bool = False
+    # Agent-earned frontier archive (Go-Explore style, organic): the worker saves emulator states at tiles it has rarely stood on and
+    # ``frontier_prob`` of episode resets start from one (rarest first).  No route knowledge.  Default off; never used in evaluation.
+    frontier_archive: bool = False
+    frontier_prob: float = 0.5
+    frontier_cap: int = 64
+    frontier_min_hp: float = 0.5   # only archive states whose lead Pokemon has at least this HP fraction
     curiosity_scale: float = 0.08   # scale of the 1/sqrt(visits) curiosity term (0.08 = historical)
     lr_schedule_updates: int = 0  # global horizon of the lr decay in updates; 0 = start_update + updates (the run's own budget)
     # starts / sharing
@@ -335,6 +341,12 @@ class TrainConfig:
             errs.append(f"lr must be > 0 (got {self.lr})")
         if not 0 < self.lr_end_frac <= 1:
             errs.append(f"lr_end_frac must be in (0, 1] (got {self.lr_end_frac})")
+        if not 0.0 <= self.frontier_prob <= 1.0:
+            errs.append(f"frontier_prob must be in [0, 1] (got {self.frontier_prob})")
+        if self.frontier_cap < 1:
+            errs.append(f"frontier_cap must be >= 1 (got {self.frontier_cap})")
+        if not 0.0 <= self.frontier_min_hp <= 1.0:
+            errs.append(f"frontier_min_hp must be in [0, 1] (got {self.frontier_min_hp})")
         if self.curiosity_scale < 0:
             errs.append(f"curiosity_scale must be >= 0 (got {self.curiosity_scale})")
         if self.assisted_start_balls < 0 or self.assisted_start_balls > 99:

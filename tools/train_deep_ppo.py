@@ -68,6 +68,7 @@ import torch.optim as optim
 from src.anti_farm import speed_multiplier
 from src.battle_record import BattleTracker
 from src.continuation import GenerationError, check_embedded, read_generation, sha256_file, write_generation
+from src.frontier_archive import FRONTIER_PREFIX, FrontierArchive
 from src.run_control import (Counters, RunHalted, RunLock, StatusWriter, check_disk, code_fingerprint, config_identity,
                              fingerprint_digest, lr_for_update, prevent_sleep, stop_requested, utc_now, write_run_manifest)
 from src.battle_obs import equip_balls, equip_supplies, heal_item_count
@@ -608,6 +609,11 @@ class EnvWorker:
         self.global_novelty = bool(cfg.get("global_novelty", False))
         self.curiosity_scale = float(cfg.get("curiosity_scale", 0.08))
         self.global_tile_counts: dict = {}
+        # Agent-earned frontier archive (OFF by default): states at tiles this worker has rarely stood on; a fraction of resets
+        # starts there (src.frontier_archive).  Never used by evaluation.
+        _fp = float(cfg.get("frontier_prob", 0.0))
+        self.frontier = FrontierArchive(cap=int(cfg.get("frontier_cap", 64)), prob=_fp) if _fp > 0 else None
+        self.frontier_min_hp = float(cfg.get("frontier_min_hp", 0.5))
         self.caught_counts: dict = {}
         self.blocked_count = 0
         self.consecutive_bumps = 0
@@ -698,12 +704,14 @@ class EnvWorker:
             data = self.archive.load(name[len(SWARM_PREFIX):])
         elif name.startswith(BATTLE_PREFIX) and self.battle_archive is not None:
             data = self.battle_archive.load(name[len(BATTLE_PREFIX):])
+        elif name.startswith(FRONTIER_PREFIX) and self.frontier is not None:
+            data = self.frontier.load_key(name[len(FRONTIER_PREFIX):])
         elif name.startswith(ROUTE_PREFIX) and self.route_archive is not None:
             loaded = self.route_archive.load(name[len(ROUTE_PREFIX):])
             if loaded is not None:
                 data, self._route_seed_stage = loaded
         if data is None:
-            name = name if not name.startswith((SWARM_PREFIX, BATTLE_PREFIX, ROUTE_PREFIX)) else self.selector.states[0]
+            name = name if not name.startswith((SWARM_PREFIX, BATTLE_PREFIX, ROUTE_PREFIX, FRONTIER_PREFIX)) else self.selector.states[0]
             data = self._state_bytes(name)
         self.state_name = name
         self.emu.load_state(data)
@@ -781,7 +789,10 @@ class EnvWorker:
 
     def reset(self):
         """Start a new episode and return its first ``(screen, ram_vec)``."""
-        data = self._load(self.selector.pick())
+        pick = self.selector.pick()
+        if self.frontier is not None:
+            pick = self.frontier.maybe_pick(self.rng) or pick   # agent-earned start near the exploration frontier
+        data = self._load(pick)
         for s in (self.visited, self.seen_tiles, self.seen_maps, self.seen_events, self.seen_waypoints):
             s.clear()
         self.tile_visit_counts.clear()
@@ -1130,6 +1141,8 @@ class EnvWorker:
             self.reset()
 
         screen, ram_vec, st_now = self.get_obs()
+        if not done:
+            self._maybe_archive_frontier(st_now)
         info_out = {
             "task_target": self.task_target,
             "task_success": task_success,
@@ -1191,6 +1204,18 @@ class EnvWorker:
         if final_obs is not None:
             info_out["final_obs"] = final_obs
         return screen, ram_vec, float(step_rew), bool(done), len(self.seen_maps), after.badges, info_out
+
+    def _maybe_archive_frontier(self, st) -> None:
+        """Archive the current emulator state the first time this worker ever stands on a cell (healthy, calm states only)."""
+        if self.frontier is None:
+            return
+        first = self.frontier.observe((st.map_group, st.map_number, st.x, st.y))
+        if not first or st.battle_mode != 0 or dialogue_open(st) or getattr(st, "fainted", False):
+            return
+        hp = getattr(st, "party_hp", ()) or ()
+        if hp and hp[0][1] > 0 and hp[0][0] / hp[0][1] < self.frontier_min_hp:
+            return
+        self.frontier.add((st.map_group, st.map_number, st.x, st.y), self.emu.save_state())
 
     def _escape(self) -> None:
         """Reflexive escape after repeated blocked moves: step toward the least-visited open neighbor."""
@@ -1802,6 +1827,9 @@ def worker_env_cfg(cfg: TrainConfig, swarm_dir: str | Path | None, battle_dir: s
         "loop_penalty_scale": cfg.loop_penalty_scale,
         "start_balls": cfg.assisted_start_balls,
         "global_novelty": cfg.global_novelty,
+        "frontier_prob": cfg.frontier_prob if cfg.frontier_archive else 0.0,
+        "frontier_cap": cfg.frontier_cap,
+        "frontier_min_hp": cfg.frontier_min_hp,
         "curiosity_scale": cfg.curiosity_scale,
         "explore_cap": cfg.explore_cap_override(),
         "heal_reward": cfg.heal_reward,
