@@ -448,6 +448,9 @@ def run_sampled_episode(worker, net, seed: int, device: str = "cpu") -> dict:
     frames = 0   # emulator frames consumed by the episode's decisions (turns, warps, dialogue and battle included)
     whiteout_events = 0   # every whole-party faint (the -15 term), counted even when it does not end the episode
     heal_reward = 0.0
+    catch_events = battle_decisions = battle_a_presses = 0
+    max_party_size = 1
+    maps_visited: set = set()
     prev_items = heal_item_count(worker.reader.parse(worker.emu.frame))
     min_lead = 1.0
     info: dict = {}
@@ -480,8 +483,17 @@ def run_sampled_episode(worker, net, seed: int, device: str = "cpu") -> dict:
         if comps.get("heal", 0.0) > 0:
             heal_events += 1
             heal_reward += float(comps["heal"])
+        if comps.get("catch", 0.0) > 0:
+            catch_events += 1
         if not done:   # after a done the info describes the NEW episode's first observation
             fun = info.get("fun") or {}
+            max_party_size = max(max_party_size, len(fun.get("ps") or ()))
+            _m = info.get("map")
+            if _m:
+                maps_visited.add(f"{_m[0]}:{_m[1]}")
+            if fun.get("bm"):
+                battle_decisions += 1
+                battle_a_presses += 1 if act == 4 else 0
             ph = fun.get("ph") or []
             if ph and ph[0][1] > 0:
                 frac = ph[0][0] / ph[0][1]
@@ -495,6 +507,8 @@ def run_sampled_episode(worker, net, seed: int, device: str = "cpu") -> dict:
     best = info.get("ended_best_path")
     return {"seed": int(seed), "steps": steps, "decisions": steps, "frames": frames,
             "model_calls": steps if net is not None else 0, "whiteout_events": whiteout_events,
+            "catch_events": catch_events, "max_party_size": max_party_size, "maps_visited": sorted(maps_visited),
+            "battle_decisions": battle_decisions, "battle_a_presses": battle_a_presses,
             "task_target": info.get("task_target", "falkner"),
             "task_success": bool(info.get("task_success", False)), "start_progress": start_progress, "best_path": best,
             "bugsy_ledger": info.get("bugsy_ledger"),
