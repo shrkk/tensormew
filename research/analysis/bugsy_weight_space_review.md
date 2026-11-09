@@ -21,13 +21,13 @@ The manifest includes a community `ilex_src` save with eight badges. It must nev
 
 ## Bugsy objectives, verified against game scripts
 
-The route is Violet â†’ Route 32 â†’ Union Cave 1F â†’ Route 33 â†’ Azalea â†’ Kurt â†’ Slowpoke Well B1F â†’ Azalea Gym â†’ Bugsy. There is a crucial prerequisite: Route 32 checks both the Zephyr Badge and receipt of the Togepi Egg. Elm's aide gives the egg in Violet's PokÃ©mon Center only when the party has a free slot. Hatching it is unnecessary. [Route 32 script](https://github.com/pret/pokecrystal/blob/3c813b0b4d82b39bf62185aceffb76fd6026c70b/maps/Route32.asm), [Violet Center script](https://github.com/pret/pokecrystal/blob/3c813b0b4d82b39bf62185aceffb76fd6026c70b/maps/VioletPokecenter1F.asm).
+The route is Violet Ã¢â€ â€™ Route 32 Ã¢â€ â€™ Union Cave 1F Ã¢â€ â€™ Route 33 Ã¢â€ â€™ Azalea Ã¢â€ â€™ Kurt Ã¢â€ â€™ Slowpoke Well B1F Ã¢â€ â€™ Azalea Gym Ã¢â€ â€™ Bugsy. There is a crucial prerequisite: Route 32 checks both the Zephyr Badge and receipt of the Togepi Egg. Elm's aide gives the egg in Violet's PokÃƒÂ©mon Center only when the party has a free slot. Hatching it is unnecessary. [Route 32 script](https://github.com/pret/pokecrystal/blob/3c813b0b4d82b39bf62185aceffb76fd6026c70b/maps/Route32.asm), [Violet Center script](https://github.com/pret/pokecrystal/blob/3c813b0b4d82b39bf62185aceffb76fd6026c70b/maps/VioletPokecenter1F.asm).
 
 These are proposed starting weights for a post-Falkner experiment, not empirically tuned values. Milestone payments occur once per campaign trajectory on genuine transitions. Loaded states initialize the ledger without payment. Resume restores the ledger. Diagnostic subepisodes do not imply campaign completion.
 
 | Objective | Verifiable condition | Proposed reward |
 |---|---|---:|
-| Accept the Togepi Egg | `EVENT_GOT_TOGEPI_EGG_FROM_ELMS_AIDE` changes falseâ†’true through play; free party slot if needed | +10 |
+| Accept the Togepi Egg | `EVENT_GOT_TOGEPI_EGG_FROM_ELMS_AIDE` changes falseÃ¢â€ â€™true through play; free party slot if needed | +10 |
 | Pass the Route 32 guard | First arrival south of the actual gate, with prerequisite verified | +2 |
 | Reach Union Cave | First legitimate entry into Union Cave 1F | +2 |
 | Traverse the cave | First legitimate cave exit onto Route 33 | +2 |
@@ -43,7 +43,7 @@ Bugsy's team is Metapod 14, Kakuna 14, Scyther 16; Scyther has Quick Attack, Lee
 
 For shaping, initially compare sparse milestones alone against a small, phase-aware potential term `beta * (gamma * Phi(s_next) - Phi(s))`. Use the learner's gamma, bounded potentials, correct terminal potentials and truncation bootstrapping. Include task phase in the state; returning to heal or talk to Kurt must be legitimate. Do not switch to Bugsy's distance field while the well is still locked. Policy-invariance requires the theorem's assumptions and boundary treatment; clipping individual shaping payments or adding arbitrary bonuses loses that guarantee. [Ng, Harada and Russell](https://people.eecs.berkeley.edu/~pabbeel/cs287-fa09/readings/NgHaradaRussell-shaping-ICML1999.pdf).
 
-Keep repeatable battle, healing and curiosity rewards off in the clean control. If sparse learning fails, add small bounded aids one at a time, with explicit ablations. A cap limits exploitation but does not make damageâ†’heal or fightâ†’reset farming unprofitable. Test those trajectories directly. Compare completion probability first and frames to success second; don't trade task completion for a higher shaped return.
+Keep repeatable battle, healing and curiosity rewards off in the clean control. If sparse learning fails, add small bounded aids one at a time, with explicit ablations. A cap limits exploitation but does not make damageÃ¢â€ â€™heal or fightÃ¢â€ â€™reset farming unprofitable. Test those trajectories directly. Compare completion probability first and frames to success second; don't trade task completion for a higher shaped return.
 
 ## Current strengths and concrete inefficiencies
 
@@ -55,13 +55,13 @@ Source references below are relative to the [pinned baseline tree](https://githu
 
 3. **Navigation is partly assisted.** `EnvWorker.step()` calls `_escape()` after four blocked moves; it chooses a least-visited walkable neighbor. That controller can provide exploration the policy did not learn. Make assistance explicit and ablate it. Sticky actions are valid environment noise if specified; heuristic escape is additional control. The PPO action then denotes a composite intervention, which complicates attribution.
 
-4. **Resource use is artificial.** `equip_supplies()` writes at least ten PokÃ© Balls and five Potions into RAM after loads, including archive loads. This can change resource distribution across training resets. A strict organic track must preserve earned inventory; supplies must come from game actions. Keep any supplied-resources benchmark separately labeled.
+4. **Resource use is artificial.** `equip_supplies()` writes at least ten PokÃƒÂ© Balls and five Potions into RAM after loads, including archive loads. This can change resource distribution across training resets. A strict organic track must preserve earned inventory; supplies must come from game actions. Keep any supplied-resources benchmark separately labeled.
 
 5. **The action interface cannot directly open Start.** The six actions are directions/A/B. Out-of-battle party management, PC deposits, move teaching and ordinary bag use may require additional menu capabilities; in-battle bag use remains possible. A full party blocks the required Togepi Egg. Before adding a Start action, verify reachable interactions and plan checkpoint migration because action count is part of the schema. Do not quietly hand these decisions to dialogue macros.
 
 6. **Offline evaluation omits training masks.** `tools/evaluate_policy.py:run_sampled_episode` calls both forward paths without `worker.last_mask`; `GreedyPolicy` also uses probability helpers that accept no mask. The periodic evaluator does apply masks. Unify evaluation through the worker and pass the current mask everywhere. Greedy and sampled success answer different questions; report both with identical environment semantics.
 
-7. **Reward complexity obscures causality.** `long_v9` pays 695 for completing the egg-route path at scale 1, versus a base badge payment of 60 Ã— 1.5, with a further time-dependent multiplier. Most dense path reward ends before the actual boss victory. Historical notes describe A-spam, grass farming and white-outs, but raw logs are unavailable, so these are repository-reported observations, not newly measured behavior. More shaping does not establish greater competence.
+7. **Reward complexity obscures causality.** `long_v9` pays 695 for completing the egg-route path at scale 1, versus a base badge payment of 60 Ãƒâ€” 1.5, with a further time-dependent multiplier. Most dense path reward ends before the actual boss victory. Historical notes describe A-spam, grass farming and white-outs, but raw logs are unavailable, so these are repository-reported observations, not newly measured behavior. More shaping does not establish greater competence.
 
 8. **The current path reward changes preferences.** `PathProgress` pays only new episode bests; retreat penalties explicitly prefer monotone travel and are not policy-invariant. Healing exemptions mitigate this but do not cover all useful detours. A second-gym extension introduces mandatory conversations, gated phases and preparation; simply extending the shortest path will repeat earlier design mistakes.
 
@@ -75,7 +75,7 @@ Source references below are relative to the [pinned baseline tree](https://githu
 
 ## How to apply weight-space programming honestly
 
-The blog defines weight-space programming as direct LLM weight edits rather than optimizer updates. It reports targeted repairs and networks constructed from task knowledge, alongside failures to establish improvements where no localized defect was found. Its Go experiment uses a bounded feedback budget and hidden opponents. These are promising experiments, not evidence that arbitrary PokÃ©mon skills can be added by repeated weight edits. [Blog](https://rikiyat.github.io/blog/weight-space-programming/).
+The blog defines weight-space programming as direct LLM weight edits rather than optimizer updates. It reports targeted repairs and networks constructed from task knowledge, alongside failures to establish improvements where no localized defect was found. Its Go experiment uses a bounded feedback budget and hidden opponents. These are promising experiments, not evidence that arbitrary PokÃƒÂ©mon skills can be added by repeated weight edits. [Blog](https://rikiyat.github.io/blog/weight-space-programming/).
 
 The released car repair explicitly wires a small controller into selected neurons; that is an engineered behavior even though stored in weights. Therefore coordinate-based route rules encoded in tensors conflict with an RL-only discovery claim. Keep such edits in a separately labeled hybrid track. [Car experiment logs](https://github.com/RikiyaT/lm_understand-logs/blob/main/exp4_fix_car/README.md).
 
@@ -92,7 +92,7 @@ My proposed experiment is narrower: identify a reproducible failure already with
 7. Promote by task success with uncertainty, then completion frames among successful runs, while enforcing Falkner retention and assistance constraints. Twenty seeds can screen candidates, but expand evaluation before accepting small differences; episode count should follow observed variance. Three independent training seeds are a practical initial control, not a universal guarantee.
 8. Reject failures, keep the parent immutable, write the reason, then choose the next bottleneck. Never promote solely because shaped return rose. Stop work immediately on user request and checkpoint before stopping when possible.
 
-Recommended first implementation order: evaluator parity â†’ explicit assistance/supply controls â†’ honest baseline â†’ second-gym event/phase profile â†’ self-generated curriculum and PPO continuation â†’ localized weight-edit experiments. Direct editing cannot currently substitute for the missing compatible policy.
+Recommended first implementation order: evaluator parity Ã¢â€ â€™ explicit assistance/supply controls Ã¢â€ â€™ honest baseline Ã¢â€ â€™ second-gym event/phase profile Ã¢â€ â€™ self-generated curriculum and PPO continuation Ã¢â€ â€™ localized weight-edit experiments. Direct editing cannot currently substitute for the missing compatible policy.
 
 ## Audit execution and limits
 
@@ -121,8 +121,17 @@ Both user-supplied files are preserved. The deep policy is the historical 21-inp
 
 Validation: 91 focused tests passed after the task implementation, followed by 7 task tests after adding the pinned-ID regression assertion. Counts overlap. Two CUDA sparse-task smoke updates completed. The resulting policy was evaluated for two 256-decision episodes (seeds 10101/10102): zero Bugsy completions, both time limits. Earlier CPU/GPU bootstrap runs and their zero-Falkner evaluation remain separate artifacts. No learned gym competence has been demonstrated.
 
-A local PPO-only sparse Bugsy baseline loop is running with four emulators, 64-step rollouts, 40 updates per round, 2,048-decision episodes, and two development episodes per round. It records parent checkpoint hashes, exact configs, commands, dependencies, source/ROM/start-state hashes, per-step traces and per-episode Bugsy ledgers. Reserved seeds 50001/50002 are not consumed by the loop; held-out evaluation requires a separate deliberate action. It makes no automatic source changes or direct policy edits, stops on source changes or low disk space, and uses no external paid API. Status and stop instructions are in `experiment-log/bugsy-baseline/README.md`.
+A local PPO-only sparse Bugsy baseline loop was run with four emulators, 64-step rollouts, 40 updates per round, 2,048-decision episodes, and two development episodes per round. It records parent checkpoint hashes, exact configs, commands, dependencies, source/ROM/start-state hashes, per-step traces and per-episode Bugsy ledgers. Reserved seeds 50001/50002 are not consumed by the loop; held-out evaluation requires a separate deliberate action. It makes no automatic source changes or direct policy edits, stops on source changes or low disk space, and uses no external paid API. Status and stop instructions are in `experiment-log/bugsy-baseline/README.md`.
 
 Local Hermes task 002 read the constants file but did not produce a patch within the bounded attempt; it was interrupted. Sol completed the correction. The failed local attempt and failed smoke command/config attempts are preserved in the working audit logs.
 
 The first continuing baseline round completed 40 CUDA PPO updates (10,240 decisions). Development evaluation on seeds10101/10102 ran2,048 decisions per episode:0/2 Bugsy completions and no earned task milestones, both time limits. Checkpoint SHA256: `31d64506bcdf23c0991cbc873f8648e5959ccb8e30b76331c825e9207a35091f`.
+
+
+## Latest Falkner competence check and experiment decision
+
+The sparse Bugsy loop is now cooperatively stopped. Three development rounds yielded no earned task milestones. Continuing the same objective from New Bark would provide no task reward until the unresolved first gym and subsequent Togepi gate; it is a poor primary learning experiment. Preserve these runs as sparse controls. The next learning target should be a verified unassisted Falkner win, then agent-earned post-Falkner curriculum through Bugsy.
+
+The provided `ppo_policy.npz` was evaluated with the historical17-input observation semantics, original five-button logits, and no masks, route-goal inputs, supplies, escape controller, dialogue macro or battle script. Two sampled rollouts (seeds10101/10102), each2,048 decisions, did not leave New Bark/its neighboring house and reached no Mystery Egg or Falkner event. Greedy replay stayed in New Bark, selecting Down2,040 times of2,048; repeating it with a second seed produced the same deterministic trajectory and is not independent evidence. The checkpoint bytes were not modified. Results and action traces are in `experiment-log/legacy-mlp-strict/`. This is a historical-schema compatibility diagnostic, not certification of its original training process.
+
+Therefore the answer to whether these runs have already beaten Falkner without scripted help is **no**. A reasonable next experiment is an explicitly labeled first-gym RL baseline: raw policy button control, earned resources, no route oracle or automatic dialogue, and a verified Zephyr Badge plus Falkner event acquired during the recorded rollout. Disclose any manually defined quest-event rewards, map milestones, novelty rewards and action masks. Those engineer the learning problem; they do not select the gameplay actions. Use agent-earned states for curriculum, keep complete base-start evaluation separate, and retain the unchanged sparse control. No reliable gym capability should be claimed until full recorded rollouts succeed.
