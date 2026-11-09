@@ -262,3 +262,24 @@ Config-only, single factor vs matched controls: `sticky_prob` 0 -> 0.5 or 0.75.
 * `k2-sticky75-warm`      : sticky_prob 0.75, warm init, vs `warm`
 * `k3-sticky50-transfer`  : sticky_prob 0.5, transfer init, vs `transfer`
 Predictions: more decisions at (31,13), (31,12), (31,11) and on the route beyond ROM index 40 than the controls; any entry into map 26:3 is progress. Risks: sticky actions make fights/menus noisier (the battle path excludes sticky: pick_executed_action ignores it in battle), more wall bumps, hiding.
+
+---
+
+# K outcome (training traces) and Round N (noise floor + long run) — pre-registered before training; code = main c1a710f, clean
+
+K (sticky actions, organic): corridor (x=31, y 10-14) visits / decisions beyond it / closest ROM-route remaining: warm control 145 / 96 / 253; k1 (0.5, warm) 9 / 8 / 259; k2 (0.75, warm) 18 / 3 / 262; transfer control 2 / 0 / n.a.; k3 (0.5, transfer) 25 / 16 / 261. Sticky actions let arms through the 1-tile corridor but did not beat the plain warm control on warm init; helped only the transfer init. Still 0 decisions in Cherrygrove everywhere. Evaluations of k1/k2 pending.
+
+**Methodological gap (stated plainly):** every comparison so far is ONE training run per arm. The plain warm control's 96 decisions beyond the corridor may be seed luck. Without the run-to-run spread of the plain configuration, none of the single-factor results above (positive or negative) can be interpreted.
+
+## Round N (organic, no changed factor except the seed)
+* `n1-warm-seed1`, `n2-warm-seed2`, `n3-warm-seed3`: the `warm` config with `seed` 1, 2, 3 (control seed was 20261110). Same init (round-0299 weights), budget and code.
+Measures (same as everywhere): corridor visits, decisions beyond the corridor, closest route tile, evaluation win rate / milestones. Prediction: large spread. If the plain config's spread covers the differences seen between arms, those differences are not evidence. Also reported: how many of the 4 plain runs (control + n1-n3) ever cross the corridor.
+
+## Long run (organic): does more training alone help?
+* `long1-warm-1536`: the `warm` config with updates 1536 (4x the budget; 393k decisions), same seed 20261110, snapshot_every 192 so snapshots exist at 192, 384, 768, 1152, 1536. Standard evaluation at 192/384 via the arm runner; later snapshots evaluated separately.
+Prediction/risk: it either keeps drifting into stall/hide (as shorter runs do) or reaches further along the route; the 384-update prefix of this run is itself a replicate of the `warm` control only up to run-to-run GPU nondeterminism.
+
+---
+
+# K evaluation outcome (written after K finished)
+No sticky-action arm moved past Route 29 in evaluation (furthest milestone 0 for all). Battle records at the final checkpoint: k1 5 battles / 0 wins; k2 17 battles / 13 wins (76%) but 47 battles / 0 wins at update 192 (volatile); k3 13 battles / 1 win. Sticky actions are dropped as a routing lever. Round N (seed replicates) and the long run are running to establish the run-to-run spread of the plain configuration and whether more training alone helps.
