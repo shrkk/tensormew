@@ -69,7 +69,7 @@ from src.anti_farm import speed_multiplier
 from src.continuation import GenerationError, check_embedded, read_generation, sha256_file, write_generation
 from src.run_control import (Counters, RunHalted, RunLock, StatusWriter, check_disk, code_fingerprint, config_identity,
                              fingerprint_digest, lr_for_update, prevent_sleep, stop_requested, utc_now, write_run_manifest)
-from src.battle_obs import equip_supplies, heal_item_count
+from src.battle_obs import equip_balls, equip_supplies, heal_item_count
 from src.periodic_eval import EVAL_STATE, aggregate, episode_record, is_eval_update
 from src.battle_mask import N_ACTIONS as MASK_N_ACTIONS
 from src.battle_mask import all_true as mask_all_true, battle_action_mask, pack_mask, unpack_mask
@@ -552,6 +552,7 @@ class EnvWorker:
         self.stepper = TileStepper(self.emu, self.reader)
         self.macros = Macros(self.emu, self.reader)
         self.supply_injection = bool(cfg.get("supply_injection", True))
+        self.start_balls = int(cfg.get("start_balls", 0))   # ASSISTED catching experiments only (balls only)
         self.escape_assist = bool(cfg.get("escape_assist", True))
         self.auto_dialogue = bool(cfg.get("auto_dialogue", True))
         self.task_target = cfg.get("task_target", "falkner")
@@ -675,9 +676,10 @@ class EnvWorker:
 
     def _equip_balls(self) -> None:
         """Hard-coded start supplies (10 Poke Balls, 5 Potions) so catching and healing can be learned from episode one."""
-        if not getattr(self, "supply_injection", True):
-            return
-        equip_supplies(self.emu)
+        if getattr(self, "supply_injection", True):
+            equip_supplies(self.emu)
+        elif getattr(self, "start_balls", 0) > 0:
+            equip_balls(self.emu, self.start_balls)   # ASSISTED catching experiments only; labeled in status/manifest
 
     def _load(self, name: str) -> bytes:
         """Load a start state (or an archived ``swarm:<key>`` / ``battle:<key>`` state) into the emulator; returns its bytes."""
@@ -1776,6 +1778,7 @@ def worker_env_cfg(cfg: TrainConfig, swarm_dir: str | Path | None, battle_dir: s
         "disable_bump_penalty": cfg.disable_bump_penalty,
         "disable_loop_penalty": cfg.disable_loop_penalty,
         "loop_penalty_scale": cfg.loop_penalty_scale,
+        "start_balls": cfg.assisted_start_balls,
         "explore_cap": cfg.explore_cap_override(),
         "heal_reward": cfg.heal_reward,
         "heal_scale": cfg.heal_reward_scale,
@@ -1864,7 +1867,8 @@ def _train_locked(cfg, states, resume, push_weights, batch_size, live, live_dir,
             prev_status = None
     status.set(phase="initializing", run_id=cfg.run_id, resume_kind=resume_kind, exact_continuation=bool(resume_generation),
                stop_marker=stop_path, config_sha256=cfg_id, owner_pid=os.getpid(), child_pids=[],
-               competence_established=False)
+               competence_established=False, assisted=bool(cfg.assisted_start_balls),
+               assisted_start_balls=int(cfg.assisted_start_balls))
     status.beat()
     gen_manifest = gen_dir = None
     if resume_generation:

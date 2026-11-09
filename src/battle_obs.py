@@ -119,6 +119,36 @@ def battle_features(state) -> np.ndarray:
     return np.clip(out, 0.0, 1.5)
 
 
+def equip_balls(emu, balls: int) -> None:
+    """ASSISTED (labeled, never part of the organic strict track): make sure the bag holds at least ``balls`` Poke Balls.
+
+    Balls only: no potions, no other item, no money, no progress flag.  Never removes anything.  Used by the separate
+    catching experiments (``assisted_start_balls``) because the start state has no balls and no money, so catching cannot
+    otherwise happen before Cherrygrove.  Any failure is ignored so a start state is never broken by it.
+    """
+    if balls <= 0:
+        return
+    try:
+        nb, ab = emu.symbol("wNumBalls")
+        pb, pa = emu.symbol("wBalls")
+        raw = emu.read(pb, pa, 25)
+        pairs = []
+        for i in range(0, 24, 2):
+            if raw[i] in (0, 255):
+                break
+            pairs.append([raw[i], raw[i + 1]])
+        for p in pairs:
+            if p[0] == POKE_BALL:
+                p[1] = max(p[1], balls)
+                break
+        else:
+            pairs.append([POKE_BALL, balls])
+        emu.write(nb, ab, bytes([len(pairs)]))
+        emu.write(pb, pa, bytes([v for p in pairs for v in p] + [255]))
+    except Exception:
+        pass
+
+
 def equip_supplies(emu, balls: int = BALL_SUPPLY, potions: int = POTION_SUPPLY) -> None:
     """Make sure the bag holds at least ``balls`` Poke Balls and ``potions`` Potions (never removes anything).
 

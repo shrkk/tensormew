@@ -105,6 +105,12 @@ class TrainConfig:
     # 1.0 = the historical behaviour.  Unlike ``disable_loop_penalty`` (which only acts when the route-progress oracle is on),
     # this works in strict runs.  An ablation knob: 0 removes the term entirely.
     loop_penalty_scale: float = 1.0
+    # ASSISTED catching experiments only (default 0 = organic/strict).  Gives the bag at least this many Poke Balls at every
+    # episode start (balls only: no potions/money/flags).  Runs that set it are labeled ``assisted`` in status/manifest and
+    # must never be mixed with organic strict results.
+    assisted_start_balls: int = 0
+    # Scale the (new-species) catch reward by free party slots: (6 - party size) / 5, so a full party pays nothing.
+    catch_party_scale: bool = False
     lr_schedule_updates: int = 0  # global horizon of the lr decay in updates; 0 = start_update + updates (the run's own budget)
     # starts / sharing
     start_states: list[str] = field(default_factory=list)
@@ -325,6 +331,8 @@ class TrainConfig:
             errs.append(f"lr must be > 0 (got {self.lr})")
         if not 0 < self.lr_end_frac <= 1:
             errs.append(f"lr_end_frac must be in (0, 1] (got {self.lr_end_frac})")
+        if self.assisted_start_balls < 0 or self.assisted_start_balls > 99:
+            errs.append(f"assisted_start_balls must be in [0, 99] (got {self.assisted_start_balls})")
         for key in ("snapshot_every", "generation_every", "lr_schedule_updates"):
             if getattr(self, key) < 0:
                 errs.append(f"{key} must be >= 0 (got {getattr(self, key)})")
@@ -478,7 +486,8 @@ class TrainConfig:
             return None
         return {"free": self.battle_free_count, "decay": self.battle_decay, "floor": self.battle_floor,
                 "wild_scale": self.wild_battle_scale, "gate_level": bool(self.level_gate_by_target and self.dwell_penalty),
-                "catch_new_only": self.catch_new_species_only, "catch_reward": self.catch_reward}
+                "catch_new_only": self.catch_new_species_only, "catch_reward": self.catch_reward,
+                "party_scale": bool(self.catch_party_scale)}
 
     def budget_cap_overrides(self) -> dict[str, float]:
         """Per-episode budget caps handed to the worker's budget dict as ``cap:<key>`` (long_v9; empty when anti-farming is off)."""

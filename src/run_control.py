@@ -231,7 +231,8 @@ def write_run_manifest(control, cfg, code_fp: dict, *, resume_kind: str, init_pa
         "development_seeds": [10101, 10102, 20001, 20002], "reserved_heldout_seeds": [50001, 50002],
         "assistance": {"supply_injection": cfg.supply_injection, "escape_assist": cfg.escape_assist,
                        "auto_dialogue": cfg.auto_dialogue, "path_progress": cfg.path_progress,
-                       "goal_potential": cfg.goal_potential},
+                       "goal_potential": cfg.goal_potential,
+                       "assisted_start_balls": cfg.assisted_start_balls},   # > 0 = ASSISTED run: never mix with organic results
         "note": "Ordinary emulator options (RTC lock, wOptions via training_options) are environment setup, not progress writes.",
     }
     path = control / "manifest.json"

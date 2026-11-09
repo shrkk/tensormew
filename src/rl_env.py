@@ -354,7 +354,12 @@ def progress_reward(
 
     def catch_pay(count: int) -> float:
         if farm_on and farm.get("catch_new_only"):
-            return float(farm.get("catch_reward", 2.0)) if count <= 1 else 0.0
+            base = float(farm.get("catch_reward", 2.0)) if count <= 1 else 0.0
+            if farm.get("party_scale"):
+                # Party-size aware: a catch is worth most while there are free slots and nothing once the party is full
+                # (the Pokemon would go to a box and never fight): (6 - party size before the catch) / 5.
+                base *= max(0, 6 - int(getattr(before, "party_count", 0))) / 5.0
+            return base
         return catch_reward_for_species(count)
 
     before_count = getattr(before, "party_count", 0)
