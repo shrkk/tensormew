@@ -132,6 +132,11 @@ if TORCH_AVAILABLE:
             # evaluation uses. It is applied inside every logit computation below, so act() / forward() (rollout) and
             # evaluate_actions*() (PPO update) always describe the SAME distribution and the log-probs stay valid.
             self.battle_a_bias = 0.0
+            # Sampling temperature (1.0 = off), set per update by the trainer exactly like ``battle_a_bias``: applied inside
+            # ``_bias_logits``, the single hook every logit path uses (act / forward / forward_recurrent / evaluate_actions*), so
+            # the rollout log-probs and the PPO re-evaluation describe the SAME tempered distribution.  Never saved: evaluation
+            # and ``load`` always use 1.0.
+            self.temperature = 1.0
 
             # 1. Visual Backbone (~11.17M params)
             self.vision_trunk = ResNet18VisionTrunk(in_channels=3)
@@ -197,6 +202,11 @@ if TORCH_AVAILABLE:
         def set_battle_a_bias(self, value: float) -> None:
             self.battle_a_bias = float(value)
 
+        def set_temperature(self, value: float) -> None:
+            if not value > 0:
+                raise ValueError(f"temperature must be > 0 (got {value})")
+            self.temperature = float(value)
+
         @staticmethod
         def _mask_logits(logits: torch.Tensor, action_mask) -> torch.Tensor:
             """Valid-action masking (``src.battle_mask``): masked logits become a large negative number, so the softmax,
@@ -212,12 +222,14 @@ if TORCH_AVAILABLE:
         def _bias_logits(self, logits: torch.Tensor, ram_obs: torch.Tensor) -> torch.Tensor:
             """Add ``battle_a_bias`` to the A logit of every sample whose in-battle flag is set (no-op at 0)."""
             bias = self.battle_a_bias
-            if not bias:
-                return logits
-            in_battle = (ram_obs[..., BATTLE_FLAG_INDEX] > 0.5).to(logits.dtype)
-            onehot = torch.zeros(logits.shape[-1], dtype=logits.dtype, device=logits.device)
-            onehot[ACTION_A_INDEX] = 1.0
-            return logits + (bias * in_battle).unsqueeze(-1) * onehot
+            if bias:
+                in_battle = (ram_obs[..., BATTLE_FLAG_INDEX] > 0.5).to(logits.dtype)
+                onehot = torch.zeros(logits.shape[-1], dtype=logits.dtype, device=logits.device)
+                onehot[ACTION_A_INDEX] = 1.0
+                logits = logits + (bias * in_battle).unsqueeze(-1) * onehot
+            if self.temperature != 1.0:
+                logits = logits / self.temperature   # sampling temperature: the same hook as the bias, so PPO stays on-policy
+            return logits
 
         @property
         def param_count(self) -> int:

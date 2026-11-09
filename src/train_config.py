@@ -118,6 +118,11 @@ class TrainConfig:
     # ``frontier_prob`` of episode resets start from one (rarest first).  No route knowledge.  Default off; never used in evaluation.
     frontier_archive: bool = False
     frontier_prob: float = 0.5
+    # Training-time sampling temperature, annealed linearly from ``train_temperature_start`` to 1.0 over
+    # ``train_temperature_updates`` GLOBAL updates (a pure function of the update index, so exact resume continues it).  Applied
+    # consistently to rollout, stored log-probs and the PPO update; evaluation always uses 1.0.  1.0 / 0 = off.
+    train_temperature_start: float = 1.0
+    train_temperature_updates: int = 0
     frontier_productivity: bool = False   # down-weight start cells whose episodes discover nothing new (dead ends); default off
     frontier_cap: int = 64
     frontier_min_hp: float = 0.5   # only archive states whose lead Pokemon has at least this HP fraction
@@ -348,6 +353,8 @@ class TrainConfig:
             errs.append(f"frontier_cap must be >= 1 (got {self.frontier_cap})")
         if not 0.0 <= self.frontier_min_hp <= 1.0:
             errs.append(f"frontier_min_hp must be in [0, 1] (got {self.frontier_min_hp})")
+        if self.train_temperature_start < 1.0 or self.train_temperature_updates < 0:
+            errs.append("train_temperature_start must be >= 1 and train_temperature_updates >= 0")
         if self.curiosity_scale < 0:
             errs.append(f"curiosity_scale must be >= 0 (got {self.curiosity_scale})")
         if self.assisted_start_balls < 0 or self.assisted_start_balls > 99:

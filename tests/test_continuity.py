@@ -382,7 +382,7 @@ def _tiny_cfg(tmp_path, name, updates, **extra):
              reward_scale="none", warmup_rollout=0, aux_loss=False, start_states=["new_bark_outside"],
              # non-trivial schedules on purpose: a reporting boundary that reset any of them would change the weights
              lr_end_frac=0.5, lr_schedule_updates=4, entropy_start=0.03, entropy_end=0.01, entropy_anneal_updates=4,
-             intrinsic_decay_updates=4, intrinsic_weight_end=0.5, entropy_boost=False, battle_lowhp_weight=0,
+             intrinsic_decay_updates=4, intrinsic_weight_end=0.5, train_temperature_start=2.0, train_temperature_updates=4, entropy_boost=False, battle_lowhp_weight=0,
              name="continuity_test", run_id=name, save_path=str(tmp_path / f"{name}.pt"),
              trace_path=str(tmp_path / f"{name}-trace.jsonl"), control_dir=str(tmp_path / f"{name}-control"),
              generation_every=2, snapshot_every=2, num_minibatches=2, epochs=1)
@@ -439,6 +439,8 @@ def test_interrupted_and_resumed_training_equals_uninterrupted_training(tmp_path
     # lr and novelty weight genuinely move; the entropy coefficient is route-progress driven (progress stays 0 in 4 updates, so
     # it correctly stays at its start value) but is still compared above (sr == su) rather than assumed.
     assert len({s[1] for s in su}) == 4 and len({s[3] for s in su}) > 1
+    temps = [json.loads(l)["temperature"] for l in (tmp_path / "uninterrupted.metrics.jsonl").read_text().splitlines() if l.strip()]
+    assert temps == sorted(temps, reverse=True) and temps[0] == 2.0 and temps[-1] < temps[0]   # the temperature really anneals
 
     # resume marker + counters + statuses are truthful
     events = [json.loads(l) for l in (tmp_path / "resumed-trace.jsonl").read_text().splitlines()]

@@ -67,6 +67,7 @@ import torch.optim as optim
 
 from src.anti_farm import speed_multiplier
 from src.battle_record import BattleTracker
+from src.run_control import temperature_for_update
 from src.continuation import GenerationError, check_embedded, read_generation, sha256_file, write_generation
 from src.frontier_archive import FRONTIER_PREFIX, FrontierArchive
 from src.run_control import (Counters, RunHalted, RunLock, StatusWriter, check_disk, code_fingerprint, config_identity,
@@ -2381,6 +2382,7 @@ def _train_locked(cfg, states, resume, push_weights, batch_size, live, live_dir,
             # the rollout's log-probs (old_logps) and the update's evaluate_actions describe the same distribution.
             a_bias = battle_a_bias_value(update, cfg.battle_a_bias, cfg.battle_a_bias_updates)
             policy.set_battle_a_bias(a_bias)
+            policy.set_temperature(temperature_for_update(update, cfg.train_temperature_start, cfg.train_temperature_updates))
             iw = intrinsic_weight_value(update, cfg.intrinsic_weight_end, cfg.intrinsic_decay_updates)
             if abs(iw - last_intrinsic) > 1e-9:   # workers only hear about a change (never for long_v3)
                 vec_env.set_intrinsic_scale(iw)
@@ -2578,6 +2580,7 @@ def _train_locked(cfg, states, resume, push_weights, batch_size, live, live_dir,
                 "phase_spread": round(spread, 4),
                 "reward_8": round(float(np.mean(reward_window_8)), 3),
                 "battle_a_bias": round(a_bias, 4),
+                "temperature": round(policy.temperature, 4),
                 "battle_archive_size": len(archive_files(battle_dir)) if battle_dir else 0,
                 "swarm_archive_size": len(archive_files(swarm_dir)) if swarm_dir else 0,
                 "intrinsic_weight": round(last_intrinsic, 4),

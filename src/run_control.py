@@ -284,3 +284,11 @@ class Counters:
         for k in self.FIELDS:
             if k in state:
                 setattr(self, k, dict(state[k]) if isinstance(state[k], dict) else int(state[k]))
+
+
+def temperature_for_update(update: int, start: float, updates: int) -> float:
+    """Linear sampling-temperature anneal from ``start`` at update 0 to 1.0 at ``updates`` (global index); 1.0 when off."""
+    if updates <= 0 or start <= 1.0:
+        return 1.0
+    frac = min(1.0, max(0.0, float(update) / float(updates)))
+    return float(start) + (1.0 - float(start)) * frac
