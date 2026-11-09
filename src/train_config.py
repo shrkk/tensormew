@@ -125,6 +125,12 @@ class TrainConfig:
     train_temperature_updates: int = 0
     frontier_productivity: bool = False   # down-weight start cells whose episodes discover nothing new (dead ends); default off
     frontier_cap: int = 64
+    # Generic corridor-traversal shaping (src.corridor): +bonus for the first crossing of a narrow corridor (a run of >= corridor_min_len
+    # tiles with exactly 2 walkable neighbours) into open space, -bonus for crossing it back (so a dead end nets zero and oscillation
+    # cannot be farmed); at most corridor_max corridors per episode.  0 = off.  No map or route knowledge.
+    corridor_bonus: float = 0.0
+    corridor_min_len: int = 2
+    corridor_max: int = 8
     frontier_min_hp: float = 0.5   # only archive states whose lead Pokemon has at least this HP fraction
     curiosity_scale: float = 0.08   # scale of the 1/sqrt(visits) curiosity term (0.08 = historical)
     lr_schedule_updates: int = 0  # global horizon of the lr decay in updates; 0 = start_update + updates (the run's own budget)
@@ -355,6 +361,8 @@ class TrainConfig:
             errs.append(f"frontier_min_hp must be in [0, 1] (got {self.frontier_min_hp})")
         if self.train_temperature_start < 1.0 or self.train_temperature_updates < 0:
             errs.append("train_temperature_start must be >= 1 and train_temperature_updates >= 0")
+        if self.corridor_bonus < 0 or self.corridor_min_len < 2 or self.corridor_max < 1:
+            errs.append("corridor_bonus must be >= 0, corridor_min_len >= 2 and corridor_max >= 1")
         if self.curiosity_scale < 0:
             errs.append(f"curiosity_scale must be >= 0 (got {self.curiosity_scale})")
         if self.assisted_start_balls < 0 or self.assisted_start_balls > 99:

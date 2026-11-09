@@ -67,6 +67,7 @@ import torch.optim as optim
 
 from src.anti_farm import speed_multiplier
 from src.battle_record import BattleTracker
+from src.corridor import CorridorTracker, walkable_count
 from src.run_control import temperature_for_update
 from src.continuation import GenerationError, check_embedded, read_generation, sha256_file, write_generation
 from src.frontier_archive import FRONTIER_PREFIX, FrontierArchive
@@ -594,6 +595,11 @@ class EnvWorker:
         self._partial = False  # the running episode is a first episode that started with a step offset
         self._battle_wait: int | None = None  # steps left to wait for the enemy species after a battle started
         self.battle_tracker = BattleTracker()   # per-battle outcome records (bookkeeping only; src.battle_record)
+        # Generic corridor-traversal shaping (src.corridor; OFF at corridor_bonus 0): potential style, +b for the first crossing of a
+        # narrow corridor into open space, -b for crossing it back, so a dead end nets zero.  No route knowledge.
+        _cb = float(cfg.get("corridor_bonus", 0.0))
+        self.corridor = (CorridorTracker(_cb, int(cfg.get("corridor_min_len", 2)), int(cfg.get("corridor_max", 8)))
+                         if _cb > 0 else None)
         self._total_steps = 0
         self._last_battle_save = -BATTLE_SAVE_GAP
 
@@ -818,6 +824,8 @@ class EnvWorker:
         self.last_dir = self.last_move = None
         self._battle_wait = None
         self.battle_tracker.reset()
+        if self.corridor is not None:
+            self.corridor.reset()
         self.ep_len = self._draw_ep_len()
         self._partial = False
         if self._first_episode and self.stagger:
@@ -1094,6 +1102,14 @@ class EnvWorker:
         if self.stagnation is not None:
             comps["stagnation"] = stag_pen
         step_rew += curiosity + loop + momentum + dwell_pen + path_rew + idle_pen + dlg_pen + retreat_pen + stag_pen
+        if self.corridor is not None:
+            if (before.map_group, before.map_number) != (after.map_group, after.map_number):
+                self.corridor.reset()
+            elif after.battle_mode == 0 and not dialogue_open(after):
+                corr = self.corridor.update((before.x, before.y), (after.x, after.y), walkable_count(after), moved)
+                if corr:
+                    comps["corridor"] = corr
+                    step_rew += corr
         if heal_care_comps:
             for k, v in heal_care_comps.items():   # long_v7: "lowhp" (<= 0), "survive" / "potion" (>= 0)
                 comps[k] = comps.get(k, 0.0) + v
@@ -1829,6 +1845,9 @@ def worker_env_cfg(cfg: TrainConfig, swarm_dir: str | Path | None, battle_dir: s
         "loop_penalty_scale": cfg.loop_penalty_scale,
         "start_balls": cfg.assisted_start_balls,
         "global_novelty": cfg.global_novelty,
+        "corridor_bonus": cfg.corridor_bonus,
+        "corridor_min_len": cfg.corridor_min_len,
+        "corridor_max": cfg.corridor_max,
         "frontier_prob": cfg.frontier_prob if cfg.frontier_archive else 0.0,
         "frontier_cap": cfg.frontier_cap,
         "frontier_productivity": cfg.frontier_productivity,
