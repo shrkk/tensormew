@@ -325,3 +325,20 @@ Pre-registered readout: (a) share of corridor decisions that are A (plain pooled
 Two bugs the tests caught before any training: (1) a run started on a dead-end tile (the way OUT of a dead end) paid; fixed by requiring the entry tile to have >= 3 walkable neighbours; (2) min_len 3 hid the real corridor and min_len 2 would have paid the x=14 pocket's U-turn end-cap; fixed with the entry/exit distance rule.
 **Correction to my earlier description of the route's 1-tile gap:** the walled passage is only TWO tiles, (31,13) and (31,12); (31,14) and (31,11) are open junction tiles at its ends (the emulator search's "single-tile bottlenecks" at (31,14),(31,13),(31,12) are cut vertices of the walkable graph, not all walled corridor tiles). Four Up presses from (31,14) still reach (31,10).
 Planned (not launched): paired-seed arms with `corridor_bonus` ~0.3, same seeds as the plain runs, after the pause is lifted and the idle-press round is resumed or abandoned.
+
+---
+
+# Pause lifted ("can you continue") — resume of Q and Round C (corridor reward) — pre-registered before C trained
+
+**Q arms resumed (exact continuation).** The saved generations required the original source. The Q arms started on commit 2822d03; a fresh checkout of that commit differed from the saved fingerprint only by line endings (9 of 100 source files: LF vs CRLF), so a worktree at 2822d03 was made byte-identical by choosing, per file, the line-ending variant whose SHA256 matches the launch manifest; all four generations then matched. The Q arms resume from that worktree with `--resume-generation auto` and run their standard evaluations. The Q readout rules from the earlier pre-registration apply unchanged.
+
+## Round C (organic): generic corridor-traversal reward, paired seeds
+Single field vs the plain `warm` runs of the same seed (n1 s1, n2 s2, n3 s3, p4 s4): `corridor_bonus` 0 -> 0.3 (src/corridor.py: +b the first time a narrow corridor is crossed into open ground, -b crossing it back; potential style; never paid for dead ends, U-turns, runs entered from or ending on a dead-end tile; <= 8 corridors per episode). min_len 2, entry/exit >= 3 apart. Code = main 71b308d + docs.
+* `c1-corridor-seed1` .. `c4-corridor-seed4`
+Pre-registered readout: (a) per-seed furthest route tile and decisions beyond (36,6) vs the same-seed plain run [plain 8 seeds: beyond (36,6) = 0 in all]; (b) share of decisions inside the dead-end pocket (x<=24, y 14-15) vs the plain runs (a dead-end reward would raise it); (c) mean `corridor` reward per episode and its net (should be positive only when the agent ends on the far side); (d) any entry into map 26:3. Interpretation rule: evidence only if >= 2 of 4 seeds reach decisions beyond (36,6) AND the pocket share does not rise above the plain spread; otherwise null/noise. Risks: the agent oscillates (nets zero by construction), enters corridors into dead-end rooms (+b while it stays), bonus too small to matter (0.3 ~ three new tiles).
+
+---
+
+# Load reduction (user request: fewer concurrent processes, queue the rest)
+The pause was lifted and 8 arms (4 Q resumes + 4 corridor arms) ran for ~2 minutes, then were reduced because they were slowing the user's PC. Now running: c1-corridor-seed1 and c2-corridor-seed2 only (2 arms, ~10 processes), at BELOW-NORMAL priority; all experiment shells now lower their own priority so trainers and emulator workers inherit it.
+Paused with exact-resume generations (cooperative STOP), at updates: c3 12, c4 12, q1 229, q2 224, q3 237, q4 216. QUEUE (one arm per worker at a time, two workers): worker A after c1 finishes: c3 -> q1 -> q3; worker B after c2 finishes: c4 -> q2 -> q4. Q arms resume from the byte-identical old-source worktree; c3/c4 resume from the main tree (source unchanged: do NOT edit src/ or tools/ in the main tree until the queue has drained, or the resumes will refuse). PROTOCOL NOTE: the Q arms have now been interrupted twice (user pause, then load reduction); each interruption was an exact resume with 0 abandoned decisions, so their trajectories are unaffected up to GPU nondeterminism.
