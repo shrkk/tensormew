@@ -1,4 +1,4 @@
-﻿# Queue E1 â€” does terminating the episode on whiteout teach the agent to die?  (pre-registered before running)
+# Queue E1 â€” does terminating the episode on whiteout teach the agent to die?  (pre-registered before running)
 
 Written 2026-11-09 before any E1 training. Controls already exist and are matched (same seed 20261110, budget 384 updates x 4 envs x 64 steps, config identity `97ea0027fb85`, commit `2b0d5ce`): arms `warm` and `transfer` under `outputs/experiment-log/claude-route29-20261109/`.
 
@@ -283,3 +283,22 @@ Prediction/risk: it either keeps drifting into stall/hide (as shorter runs do) o
 
 # K evaluation outcome (written after K finished)
 No sticky-action arm moved past Route 29 in evaluation (furthest milestone 0 for all). Battle records at the final checkpoint: k1 5 battles / 0 wins; k2 17 battles / 13 wins (76%) but 47 battles / 0 wins at update 192 (volatile); k3 13 battles / 1 win. Sticky actions are dropped as a routing lever. Round N (seed replicates) and the long run are running to establish the run-to-run spread of the plain configuration and whether more training alone helps.
+
+---
+
+# Round N outcome (the noise floor) and Round P (seed population) — written before P trained; code = main c1a710f
+
+**Noise floor, plain `warm` config, 4 seeds (control 20261110 + seeds 1,2,3), training traces:** corridor (x=31,y10-14) visits 145 / 0 / 102 / 24; decisions BEYOND the corridor 96 / 0 / 0 / 42; closest ROM-route remaining 255 / 271 / 265 / 258; late-training battle occupancy / A-in-battle 58%/37%, 75%/1%, 48%/15%, 13%/21%. Two of four identical-config runs crossed the corridor; none went past ROM route index ~53 (second grass patch, x 30-37, y 4-9). **Consequence: run-to-run spread on the main routing metric (0-96) is larger than the differences between almost all earlier single-run arms; those results (positive and negative) are not distinguishable from noise unless they exceed this spread.** Single-seed comparisons in this log must be read that way.
+
+## Round P (organic): sample more seeds of the plain config, keep the furthest
+Rationale: with a spread this large the statistically sound approach is a population of seeds, then continue the ones that got furthest (population-based selection), instead of tuning a single run.
+* `p4-warm-seed4`, `p5-warm-seed5`, `p6-warm-seed6`, `p7-warm-seed7`: the `warm` config with seeds 4-7 (only the seed differs).
+Measures as before. Selection rule fixed in advance: an arm is "promising" if its training trace has >= 20 decisions on the route past ROM index 51 (tile (36,6)) or any decision in map 26:3; promising arms are continued from their final snapshot for another 384 updates (warm start, fresh optimizer, same config).
+
+---
+
+# Round P outcome, the wall at (36,6), and run hygiene (written before the next round)
+
+**Population of 8 plain-config seeds (control + seeds 1-7), furthest point on the emulator-verified route (84 tiles; (31,14)=idx 30, (36,6)=idx 43):** max idx 43 / 27 / 32 / 40 / 31 / 32 / 32 / 33; decisions beyond (36,6): 0 in all eight; 0 decisions in Cherrygrove. By the pre-registered rule ("promising" = >= 20 decisions beyond (36,6) or any decision in 26:3) NO arm is promising; none is continued. (Clarification of my own pre-registration: "route index 51 (tile (36,6))" mixed two indexings; the rule was applied as "route tiles beyond (36,6)".)
+**Long run (long1-warm-1536) COMPLETED its full 1536 updates (393,216 decisions; stop_reason budget_exhausted).** It never reached the corridor: max route idx 26 (33,16), 0 decisions at idx >= 31, vs 27-43 for the 384-update runs. More training alone did not help. CORRECTION OF AN EARLIER ENTRY IN THIS LOG: a note written a few minutes earlier said the run was "stopped at ~850/1536 on a cooperative STOP". That was WRONG: I read a stale status (update ~850) and by the time the STOP marker was created the run was at update 1535/1536 and finished on its own budget; the marker was removed and had no effect. The numbers quoted for it before completion (232k decisions, max idx 26) were from a partial trace; the final trace gives the same result.
+**Map of the wall (diagnostic, analysis/map_wall.py):** the route does two counter-intuitive things. (1) At x=31 it leaves the westward corridor going UP four tiles. (2) At (31,10) it turns EAST for five tiles (away from Cherrygrove), then north four tiles through tall grass along x=36, and only then west along y=6. Agents instead go WEST at (31,10) into the heavily visited y=10-12, x=23-28 region (100-999 visits per tile), which is the Cut-tree dead end at (22,11); the y=6 west stretch (x=30..34) is reachable but was never visited by any of the four traces mapped.
