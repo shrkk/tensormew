@@ -459,10 +459,12 @@ def run_sampled_episode(worker, net, seed: int, device: str = "cpu") -> dict:
                 s_t = (torch.from_numpy(screen).to(device).permute(2, 0, 1).unsqueeze(0).float().div_(255.0)
                        .contiguous(memory_format=torch.channels_last))
                 r_t = torch.from_numpy(ram).float().to(device).unsqueeze(0)
+                mask_kwargs = ({"action_mask": torch.as_tensor(worker.last_mask, dtype=torch.bool, device=device).unsqueeze(0)}
+                               if getattr(worker, "action_mask", False) else {})
                 if getattr(net, "use_gru", False):
-                    logits, _, hx = net.forward_recurrent(s_t, r_t, hx)
+                    logits, _, hx = net.forward_recurrent(s_t, r_t, hx, **mask_kwargs)
                 else:
-                    logits, _ = net(s_t, r_t)
+                    logits, _ = net(s_t, r_t, **mask_kwargs)
                 act = int(torch.distributions.Categorical(logits=logits).sample().item())
         screen, ram, _rew, done, _maps, _badges, info = worker.step(act)
         steps += 1
@@ -485,7 +487,9 @@ def run_sampled_episode(worker, net, seed: int, device: str = "cpu") -> dict:
                 items_used += prev_items - items
             prev_items = items
     best = info.get("ended_best_path")
-    return {"seed": int(seed), "steps": steps, "start_progress": start_progress, "best_path": best,
+    return {"seed": int(seed), "steps": steps, "task_target": info.get("task_target", "falkner"),
+            "task_success": bool(info.get("task_success", False)), "start_progress": start_progress, "best_path": best,
+            "bugsy_ledger": info.get("bugsy_ledger"),
             "gain": (None if best is None or start_progress is None else float(best) - float(start_progress)),
             "ms_steps": ms_steps, "end_reason": info.get("end_reason"), "whiteout": info.get("end_reason") == "whiteout",
             "lowhp_steps_outside_battle": lowhp_out, "heal_events": heal_events, "heal_reward": round(heal_reward, 3),

@@ -1,0 +1,15 @@
+{
+  "preset": "long_v9",
+  "supply_injection": false,
+  "escape_assist": false,
+  "auto_dialogue": false,
+  "battle_a_bias": 0,
+  "periodic_eval": false,
+  "trace_path": "../../outputs/experiment-log/gpu-smoke-steps.jsonl",
+  "envs": 2,
+  "rollout_steps": 16,
+  "updates": 2,
+  "max_steps": 128,
+  "ppo": {"num_minibatches": 2, "epochs": 1},
+  "seed": 20261109
+}

@@ -49,6 +49,7 @@ import argparse
 import dataclasses
 import inspect
 import math
+import json
 import multiprocessing as mp
 import os
 import sys
@@ -545,6 +546,10 @@ class EnvWorker:
         self.reader = RamParser(self.emu)
         self.stepper = TileStepper(self.emu, self.reader)
         self.macros = Macros(self.emu, self.reader)
+        self.supply_injection = bool(cfg.get("supply_injection", True))
+        self.escape_assist = bool(cfg.get("escape_assist", True))
+        self.auto_dialogue = bool(cfg.get("auto_dialogue", True))
+        self.task_target = cfg.get("task_target", "falkner")
 
         names = list(start_states)
         stages = self._stage_of_states(sorted(set(names))) if cfg.get("stage_balanced") else None
@@ -664,6 +669,8 @@ class EnvWorker:
 
     def _equip_balls(self) -> None:
         """Hard-coded start supplies (10 Poke Balls, 5 Potions) so catching and healing can be learned from episode one."""
+        if not getattr(self, "supply_injection", True):
+            return
         equip_supplies(self.emu)
 
     def _load(self, name: str) -> bytes:
@@ -790,6 +797,8 @@ class EnvWorker:
         self._jitter(data)
         st = self.reader.parse(self.emu.frame)
         # Seed the caught species from the party so the starter does not pay a catch bonus later.
+        from src.bugsy_task import BugsyLedger
+        self.bugsy_ledger = BugsyLedger(st) if self.task_target == "bugsy_sparse" else None
         for species_id in getattr(st, "party_species", ()):
             if species_id and species_id != 255:
                 self.caught_counts[species_id] = self.caught_counts.get(species_id, 0) + 1
@@ -902,6 +911,7 @@ class EnvWorker:
         """Execute one policy action; returns the 7-tuple the trainer expects (see ``VectorEnv.step``)."""
         emu, stepper, macros, reader = self.emu, self.stepper, self.macros, self.reader
         before = reader.parse(emu.frame)
+        frame_before = emu.frame
         exec_idx = pick_executed_action(int(act_idx), self.last_move, self.sticky_prob, self.rng,
                                         in_battle=before.battle_mode != 0)
         if exec_idx < 4:
@@ -916,9 +926,14 @@ class EnvWorker:
             emu.press(action_name, frames=8)
             emu.tick(12, render=False)
             self.blocked_count = 0
-        elif dialogue_open(before):
+        elif getattr(self, "auto_dialogue", True) and dialogue_open(before):
             # Overworld dialogue ONLY is auto-advanced (episode feasibility: signs, NPC chatter, cutscenes, Nurse Joy).
             macros.mash_text(max_frames=80)
+            self.blocked_count = 0
+        elif dialogue_open(before):
+            # Strict mode: the sampled button also controls overworld dialogue.
+            emu.press(action_name, frames=8)
+            emu.tick(12, render=False)
             self.blocked_count = 0
         elif action_name in BUTTON_ACTIONS:
             emu.press(action_name, frames=8)
@@ -1043,12 +1058,20 @@ class EnvWorker:
         # No termination on milestones or on the badge; the episode ends on the step limit (a time limit, not a goal) or,
         # with ``terminate_on_whiteout`` (long_v6), on a white-out: a TRUE termination (not truncated, so the trainer does
         # not bootstrap the value; the -15 white-out penalty of this step is the terminal reward).
+        bugsy_components = self.bugsy_ledger.step(before, after) if self.bugsy_ledger is not None else None
+        bugsy_success = bool(self.bugsy_ledger is not None and self.bugsy_ledger.success)
+        bugsy_outcome = ({"eligible": self.bugsy_ledger.eligible,
+                          "earned": sorted(self.bugsy_ledger.earned), "success": bugsy_success}
+                         if self.bugsy_ledger is not None else None)
+        if bugsy_components is not None:
+            comps = bugsy_components
+            step_rew = sum(comps.values())
         self.steps += 1
         whiteout = bool(getattr(after, "fainted", False) and not getattr(before, "fainted", False))
-        terminated = self.terminate_on_whiteout and whiteout
+        terminated = (self.terminate_on_whiteout and whiteout) or bugsy_success
         truncated = self.steps >= self.ep_len and not terminated  # time limit, not a real end
         done = truncated or terminated
-        end_reason = "whiteout" if terminated else ("time_limit" if truncated else None)
+        end_reason = "bugsy_success" if bugsy_success else ("whiteout" if terminated else ("time_limit" if truncated else None))
         ended_maps = len(self.seen_maps)
         ended_state = self.state_name
         phi_end = _story_phi(after, self.seen_maps)
@@ -1067,11 +1090,27 @@ class EnvWorker:
         ended_start_path = self._ep_start_path if done else None
         self._maybe_archive(after)
         final_obs = self._peek_obs(after) if truncated else None
+        frame_after = emu.frame
         if done:
             self.reset()
 
         screen, ram_vec, st_now = self.get_obs()
         info_out = {
+            "task_target": self.task_target,
+            "task_success": bugsy_success,
+            "bugsy_ledger": bugsy_outcome,
+            "transition": {
+                "frame_before": frame_before, "frame_after": frame_after,
+                "map": [after.map_group, after.map_number], "x": after.x, "y": after.y,
+                "battle_mode": after.battle_mode, "badges": after.badges,
+                "party_hp": getattr(after, "party_hp", ()),
+                "party_levels": getattr(after, "party_levels", ()),
+                "event_flags": bytes(getattr(after, "event_flags", ()) or ()).hex(),
+                "items": getattr(after, "items", ()), "item_counts": getattr(after, "item_counts", ()),
+                "supplies_injected": getattr(self, "supply_injection", True),
+                "escape_assist_enabled": getattr(self, "escape_assist", True),
+                "auto_dialogue_enabled": getattr(self, "auto_dialogue", True),
+            },
             "map": [st_now.map_group, st_now.map_number],
             "x": st_now.x,
             "y": st_now.y,
@@ -1117,6 +1156,9 @@ class EnvWorker:
 
     def _escape(self) -> None:
         """Reflexive escape after repeated blocked moves: step toward the least-visited open neighbor."""
+        if not getattr(self, "escape_assist", True):
+            self.blocked_count = 0
+            return
         st_cur = self.reader.parse(self.emu.frame)
         tiles = getattr(st_cur, "tiles", {})
         candidates = []
@@ -1631,6 +1673,10 @@ def worker_env_cfg(cfg: TrainConfig, swarm_dir: str | Path | None, battle_dir: s
                    route_dir: str | Path | None = None) -> dict:
     return {
         "route_dir": str(route_dir) if (cfg.route_ckpt and route_dir) else None,
+        "supply_injection": cfg.supply_injection,
+        "task_target": cfg.task_target,
+        "escape_assist": cfg.escape_assist,
+        "auto_dialogue": cfg.auto_dialogue,
         "route_prob": cfg.route_ckpt_prob if cfg.route_ckpt else 0.0,
         "route_every": cfg.route_ckpt_every,
         "route_per_bucket": cfg.route_ckpt_per_bucket,
@@ -1920,6 +1966,10 @@ def train(
     # long_v8: the valid-action mask each step's action was sampled under; stored so the PPO update re-applies the SAME mask.
     buf_masks = torch.ones((B, T, MASK_N_ACTIONS), dtype=torch.bool) if use_mask else None
     evaluator = PeriodicEvaluator(cfg, device) if cfg.periodic_eval else None   # long_v8: from-start evaluation, own env
+    trace = None
+    if cfg.trace_path:
+        from src.experiment_trace import ExperimentTrace
+        trace = ExperimentTrace(cfg.trace_path, json.loads(cfg.to_json()))
 
     ms_stats = MilestoneStats()
     split_stats = SourceSplitStats() if cfg.source_split_metrics else None   # long_v7: learned vs head start, by reset source
@@ -1943,6 +1993,9 @@ def train(
 
     try:
         for update in range(start_update, start_update + updates):
+            if cfg.stop_path and Path(cfg.stop_path).exists():
+                print(f"[stop] stop marker found: {cfg.stop_path}", flush=True)
+                break
             t0 = time.time()
             buf_values.zero_(), buf_rewards.zero_(), buf_dones.zero_(), buf_trunc.zero_(), buf_boot.zero_()
             buf_raw.zero_()
@@ -1998,6 +2051,10 @@ def train(
                 phase["infer"] += _t2 - _t
                 screens_next, rams_next, rews, dones, map_counts, badges = vec_env.step(actions_np)
                 infos = vec_env.last_infos
+                if trace is not None:
+                    trace.step(update, step, actions_np, dist.probs.detach().cpu().numpy(),
+                               val.detach().cpu().numpy(), logp_t.detach().cpu().numpy(), rams_cur,
+                               step_mask_np, rews, dones, infos)
                 _t3 = _pc()
                 phase["env"] += _t3 - _t2
                 if feed is not None:
@@ -2244,6 +2301,9 @@ def train(
             feed.finish()
         if evaluator is not None:
             evaluator.close()
+        if trace is not None:
+            trace.checkpoint(save_path, last_done)
+            trace.close()
         vec_env.close()
 
 

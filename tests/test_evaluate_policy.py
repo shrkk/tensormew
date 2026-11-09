@@ -154,3 +154,55 @@ class RomTests(unittest.TestCase):
 
 if __name__ == "__main__":
     unittest.main()
+
+
+class SampledMaskTests(unittest.TestCase):
+    def test_current_mask_reaches_both_forward_paths_and_disabled_mode(self):
+        import torch
+        from types import SimpleNamespace
+
+        for recurrent in (False, True):
+            for masked in (False, True):
+                masks = [np.array([True, False, True, False, True, False]),
+                         np.array([False, True, False, True, False, True])]
+
+                class Worker:
+                    action_mask = masked
+                    path_progress = None
+                    emu = SimpleNamespace(frame=0)
+                    reader = SimpleNamespace(parse=lambda frame: SimpleNamespace(items=(), item_counts=()))
+
+                    def reset(self):
+                        self.t, self.last_mask = 0, masks[0]
+                        return np.zeros((8, 8, 3), np.uint8), np.zeros(2, np.float32)
+
+                    def step(self, action):
+                        self.t += 1
+                        self.last_mask = masks[min(self.t, 1)]
+                        return (np.zeros((8, 8, 3), np.uint8), np.zeros(2, np.float32),
+                                0.0, self.t == 2, 1, 0, {})
+
+                class Net:
+                    use_gru = recurrent
+
+                    def __init__(self):
+                        self.seen = []
+
+                    def __call__(self, screen, ram, **kwargs):
+                        self.seen.append(kwargs)
+                        return torch.zeros((1, 6)), torch.zeros(1)
+
+                    def forward_recurrent(self, screen, ram, hx, **kwargs):
+                        logits, value = self(screen, ram, **kwargs)
+                        return logits, value, hx
+
+                net = Net()
+                ev.run_sampled_episode(Worker(), net, seed=13)
+                self.assertEqual(len(net.seen), 2)
+                for i, kwargs in enumerate(net.seen):
+                    if masked:
+                        self.assertEqual(kwargs['action_mask'].dtype, torch.bool)
+                        self.assertEqual(kwargs['action_mask'].shape, (1, 6))
+                        self.assertEqual(kwargs['action_mask'].tolist(), [masks[i].tolist()])
+                    else:
+                        self.assertEqual(kwargs, {})

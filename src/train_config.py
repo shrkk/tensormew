@@ -87,6 +87,13 @@ class TrainConfig:
     # environment robustness
     sticky_prob: float = 0.1
     jitter_max: int = 6
+    # Explicit assistance controls; strict local experiments disable all three.
+    supply_injection: bool = True
+    escape_assist: bool = True
+    auto_dialogue: bool = True
+    task_target: str = "falkner"  # bugsy_sparse replaces all legacy reward with transition-only Bugsy milestones
+    trace_path: str = ""  # append-only action/reward/transition audit, disabled for legacy runs
+    stop_path: str = ""  # cooperative local stop marker checked between PPO updates
     # starts / sharing
     start_states: list[str] = field(default_factory=list)
     stage_balanced: bool = True
@@ -292,6 +299,13 @@ class TrainConfig:
 
     def validate(self) -> "TrainConfig":
         errs: list[str] = []
+        if self.task_target not in ("falkner", "bugsy_sparse"):
+            errs.append("task_target must be falkner or bugsy_sparse")
+        if self.task_target == "bugsy_sparse":
+            if self.supply_injection or self.escape_assist or self.auto_dialogue:
+                errs.append("bugsy_sparse requires all assistance controls disabled")
+            if self.path_progress or self.goal_potential:
+                errs.append("bugsy_sparse requires Falkner path shaping disabled")
         for key in ("envs", "rollout_steps", "updates", "max_steps"):
             if getattr(self, key) < 1:
                 errs.append(f"{key} must be >= 1 (got {getattr(self, key)})")
