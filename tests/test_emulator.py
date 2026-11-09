@@ -10,11 +10,11 @@ ROM_OK = ROM_PATH.exists() and SYM_PATH.exists()
 
 class RomCheckTests(unittest.TestCase):
     def test_wrong_bytes_rejected_before_boot(self):
-        with tempfile.NamedTemporaryFile(suffix=".gbc") as handle:
-            handle.write(b"not a rom")
-            handle.flush()
+        with tempfile.TemporaryDirectory() as folder:
+            path = Path(folder) / "wrong.gbc"
+            path.write_bytes(b"not a rom")
             with self.assertRaises(RomMismatchError):
-                Emulator(rom=handle.name, verify_rom=True)
+                Emulator(rom=path, verify_rom=True)
 
 
 @unittest.skipUnless(ROM_OK, "ROM not present")

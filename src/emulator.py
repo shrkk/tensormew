@@ -111,7 +111,11 @@ class Emulator:
                 if self.frame_hook is not None:
                     self.frame_hook()
             return bool(ok)
-        ok = self._pb.tick(n, render)
+        # A null window still needs pixel rendering for policy observations.
+        # PyBoy's public tick renders the final frame of this existing batch;
+        # suppressing it freezes screen.ndarray while RAM continues to advance.
+        # Keep the same n simulated frames: never add an observation-only tick.
+        ok = self._pb.tick(n, render or self._headless)
         self._frame += n
         return bool(ok)
 
