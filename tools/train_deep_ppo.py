@@ -599,6 +599,13 @@ class EnvWorker:
         self.seen_events: set = set()
         self.seen_waypoints: set = set()
         self.tile_visit_counts: dict = {}
+        # Cross-episode novelty (OFF by default = historical per-episode behaviour).  The per-episode counts above are
+        # cleared at every reset, so every episode re-pays the same familiar tiles (e.g. a dead-end corridor).  With
+        # ``global_novelty`` the curiosity term and the first-visit tile bonus fall off with the number of times THIS worker has
+        # ever stood on the tile (never cleared), so only genuinely rarely-seen tiles pay.  Generic: no map/direction knowledge.
+        self.global_novelty = bool(cfg.get("global_novelty", False))
+        self.curiosity_scale = float(cfg.get("curiosity_scale", 0.08))
+        self.global_tile_counts: dict = {}
         self.caught_counts: dict = {}
         self.blocked_count = 0
         self.consecutive_bumps = 0
@@ -712,6 +719,8 @@ class EnvWorker:
         self.seen_tiles.add(tile)
         self.seen_maps.add((st.map_group, st.map_number))
         self.tile_visit_counts[tile] = self.tile_visit_counts.get(tile, 0) + 1
+        if self.global_novelty:
+            self.global_tile_counts[tile] = self.global_tile_counts.get(tile, 0) + 1
         ram_vec = observe(st, self.visited, deep=True, seen_maps=self.seen_maps, time_frac=self._time_frac())
         if self.action_mask:
             self.last_mask = battle_action_mask(self.emu, st)   # only reads the tilemap while battle_mode != 0
@@ -997,6 +1006,12 @@ class EnvWorker:
             seen_waypoints=self.seen_waypoints, info=pr_info,
             components=comps, goal_potential=self.goal_potential, **pr_kwargs,
         )
+        after_tile = (after.map_group, after.map_number, after.x, after.y)
+        if self.global_novelty and comps.get("tile"):
+            # first-visit tile bonus, discounted by how often this worker has EVER been on the tile (visits before this step)
+            adj = comps["tile"] * (1.0 / math.sqrt(1.0 + self.global_tile_counts.get(after_tile, 0)) - 1.0)
+            comps["tile"] += adj
+            step_rew += adj
         step_rew += worker_interaction_reward(before, after, exec_idx, self.seen_interactions, self.seen_warps, comps,
                                               self.budget if self._budget_ok else None)
         if self.heal_reward:
@@ -1006,7 +1021,8 @@ class EnvWorker:
                 step_rew += heal_pay
         # Count-based novelty (1/sqrt(visits)) and a small straight-line momentum bonus: generic exploration terms.
         v_count = self.tile_visit_counts.get((after.map_group, after.map_number, after.x, after.y), 0)
-        curiosity = intrinsic_curiosity_reward(v_count, scale=0.08)
+        curiosity = intrinsic_curiosity_reward(self.global_tile_counts.get(after_tile, 0) if self.global_novelty else v_count,
+                                               scale=self.curiosity_scale)
         curiosity = budget_pay(self.budget, "explore", curiosity) if self._budget_ok else curiosity
         in_play = not busy and after.battle_mode == 0 and not dialogue_open(after)  # no loop penalty in fights/text
         loop = -0.02 * min(4.0, (v_count - 10) / 5.0) if (v_count > 12 and in_play) else 0.0  # anti-looping pacing
@@ -1779,6 +1795,8 @@ def worker_env_cfg(cfg: TrainConfig, swarm_dir: str | Path | None, battle_dir: s
         "disable_loop_penalty": cfg.disable_loop_penalty,
         "loop_penalty_scale": cfg.loop_penalty_scale,
         "start_balls": cfg.assisted_start_balls,
+        "global_novelty": cfg.global_novelty,
+        "curiosity_scale": cfg.curiosity_scale,
         "explore_cap": cfg.explore_cap_override(),
         "heal_reward": cfg.heal_reward,
         "heal_scale": cfg.heal_reward_scale,

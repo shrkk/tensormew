@@ -111,6 +111,10 @@ class TrainConfig:
     assisted_start_balls: int = 0
     # Scale the (new-species) catch reward by free party slots: (6 - party size) / 5, so a full party pays nothing.
     catch_party_scale: bool = False
+    # Cross-episode (global) novelty: the curiosity term and the first-visit tile bonus use visit counts that persist across
+    # episodes (per worker) instead of being reset every episode, so familiar dead ends stop paying.  Default off.
+    global_novelty: bool = False
+    curiosity_scale: float = 0.08   # scale of the 1/sqrt(visits) curiosity term (0.08 = historical)
     lr_schedule_updates: int = 0  # global horizon of the lr decay in updates; 0 = start_update + updates (the run's own budget)
     # starts / sharing
     start_states: list[str] = field(default_factory=list)
@@ -331,6 +335,8 @@ class TrainConfig:
             errs.append(f"lr must be > 0 (got {self.lr})")
         if not 0 < self.lr_end_frac <= 1:
             errs.append(f"lr_end_frac must be in (0, 1] (got {self.lr_end_frac})")
+        if self.curiosity_scale < 0:
+            errs.append(f"curiosity_scale must be >= 0 (got {self.curiosity_scale})")
         if self.assisted_start_balls < 0 or self.assisted_start_balls > 99:
             errs.append(f"assisted_start_balls must be in [0, 99] (got {self.assisted_start_balls})")
         for key in ("snapshot_every", "generation_every", "lr_schedule_updates"):
