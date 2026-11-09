@@ -449,6 +449,7 @@ def run_sampled_episode(worker, net, seed: int, device: str = "cpu") -> dict:
     whiteout_events = 0   # every whole-party faint (the -15 term), counted even when it does not end the episode
     heal_reward = 0.0
     catch_events = battle_decisions = battle_a_presses = 0
+    battle_records: list = []   # one dict per finished battle (src.battle_record): outcome, decisions, HP lost
     max_party_size = 1
     maps_visited: set = set()
     prev_items = heal_item_count(worker.reader.parse(worker.emu.frame))
@@ -485,6 +486,8 @@ def run_sampled_episode(worker, net, seed: int, device: str = "cpu") -> dict:
             heal_reward += float(comps["heal"])
         if comps.get("catch", 0.0) > 0:
             catch_events += 1
+        if info.get("battle_end"):
+            battle_records.append(info["battle_end"])
         if not done:   # after a done the info describes the NEW episode's first observation
             fun = info.get("fun") or {}
             max_party_size = max(max_party_size, len(fun.get("ps") or ()))
@@ -508,7 +511,7 @@ def run_sampled_episode(worker, net, seed: int, device: str = "cpu") -> dict:
     return {"seed": int(seed), "steps": steps, "decisions": steps, "frames": frames,
             "model_calls": steps if net is not None else 0, "whiteout_events": whiteout_events,
             "catch_events": catch_events, "max_party_size": max_party_size, "maps_visited": sorted(maps_visited),
-            "battle_decisions": battle_decisions, "battle_a_presses": battle_a_presses,
+            "battle_decisions": battle_decisions, "battle_a_presses": battle_a_presses, "battle_records": battle_records,
             "task_target": info.get("task_target", "falkner"),
             "task_success": bool(info.get("task_success", False)), "start_progress": start_progress, "best_path": best,
             "bugsy_ledger": info.get("bugsy_ledger"),
@@ -563,6 +566,8 @@ def sampled_eval_main(args) -> int:
                    "config": cfg.name, "episodes": episodes, "summary": summarize_sampled(episodes),
                    "checkpoint_sha256": ckpt_sha,   # which model these numbers evaluate (never a later checkpoint)
                    "seeds": [e["seed"] for e in episodes],
+                   "battle_summary": __import__("src.battle_record", fromlist=["summarize"]).summarize(
+                       [r for e in episodes for r in e.get("battle_records", [])]),
                    "task_successes": sum(bool(e.get("task_success")) for e in episodes),
                    "compute": {"decisions": sum(e["decisions"] for e in episodes), "frames": sum(e["frames"] for e in episodes),
                                "model_calls": sum(e["model_calls"] for e in episodes),

@@ -66,6 +66,7 @@ import torch
 import torch.optim as optim
 
 from src.anti_farm import speed_multiplier
+from src.battle_record import BattleTracker
 from src.continuation import GenerationError, check_embedded, read_generation, sha256_file, write_generation
 from src.run_control import (Counters, RunHalted, RunLock, StatusWriter, check_disk, code_fingerprint, config_identity,
                              fingerprint_digest, lr_for_update, prevent_sleep, stop_requested, utc_now, write_run_manifest)
@@ -590,6 +591,7 @@ class EnvWorker:
         self._first_episode = True
         self._partial = False  # the running episode is a first episode that started with a step offset
         self._battle_wait: int | None = None  # steps left to wait for the enemy species after a battle started
+        self.battle_tracker = BattleTracker()   # per-battle outcome records (bookkeeping only; src.battle_record)
         self._total_steps = 0
         self._last_battle_save = -BATTLE_SAVE_GAP
 
@@ -802,6 +804,7 @@ class EnvWorker:
         self.blocked_count = self.consecutive_bumps = self.steps = 0
         self.last_dir = self.last_move = None
         self._battle_wait = None
+        self.battle_tracker.reset()
         self.ep_len = self._draw_ep_len()
         self._partial = False
         if self._first_episode and self.stagger:
@@ -978,6 +981,7 @@ class EnvWorker:
 
         after = reader.parse(emu.frame)
         self._total_steps += 1
+        battle_end = self.battle_tracker.update(before, after)   # finished-battle record or None (never affects the reward)
         self._maybe_archive_battle(before, after)
         unvisited_neighbor = False
         if 0 <= exec_idx < 4:
@@ -1175,6 +1179,8 @@ class EnvWorker:
                 "mo": int(getattr(st_now, "money", 0)),
             },
         }
+        if battle_end is not None:
+            info_out["battle_end"] = battle_end
         if self.action_mask:
             info_out["amask"] = pack_mask(self.last_mask)   # valid actions of the NEXT observation (the new episode's after a reset)
         if ended_ms is not None:   # the finished episode's milestone summary (src.milestone_stats)
