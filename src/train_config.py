@@ -118,6 +118,7 @@ class TrainConfig:
     # ``frontier_prob`` of episode resets start from one (rarest first).  No route knowledge.  Default off; never used in evaluation.
     frontier_archive: bool = False
     frontier_prob: float = 0.5
+    frontier_productivity: bool = False   # down-weight start cells whose episodes discover nothing new (dead ends); default off
     frontier_cap: int = 64
     frontier_min_hp: float = 0.5   # only archive states whose lead Pokemon has at least this HP fraction
     curiosity_scale: float = 0.08   # scale of the 1/sqrt(visits) curiosity term (0.08 = historical)

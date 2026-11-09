@@ -612,7 +612,8 @@ class EnvWorker:
         # Agent-earned frontier archive (OFF by default): states at tiles this worker has rarely stood on; a fraction of resets
         # starts there (src.frontier_archive).  Never used by evaluation.
         _fp = float(cfg.get("frontier_prob", 0.0))
-        self.frontier = FrontierArchive(cap=int(cfg.get("frontier_cap", 64)), prob=_fp) if _fp > 0 else None
+        self.frontier = (FrontierArchive(cap=int(cfg.get("frontier_cap", 64)), prob=_fp,
+                                         productivity=bool(cfg.get("frontier_productivity", False))) if _fp > 0 else None)
         self.frontier_min_hp = float(cfg.get("frontier_min_hp", 0.5))
         self.caught_counts: dict = {}
         self.blocked_count = 0
@@ -1829,6 +1830,7 @@ def worker_env_cfg(cfg: TrainConfig, swarm_dir: str | Path | None, battle_dir: s
         "global_novelty": cfg.global_novelty,
         "frontier_prob": cfg.frontier_prob if cfg.frontier_archive else 0.0,
         "frontier_cap": cfg.frontier_cap,
+        "frontier_productivity": cfg.frontier_productivity,
         "frontier_min_hp": cfg.frontier_min_hp,
         "curiosity_scale": cfg.curiosity_scale,
         "explore_cap": cfg.explore_cap_override(),

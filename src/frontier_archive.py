@@ -27,7 +27,7 @@ def parse_key(key: str):
 
 
 class FrontierArchive:
-    def __init__(self, cap: int = 64, prob: float = 0.5):
+    def __init__(self, cap: int = 64, prob: float = 0.5, productivity: bool = False):
         if cap < 1:
             raise ValueError("cap must be >= 1")
         if not 0.0 <= prob <= 1.0:
@@ -38,6 +38,13 @@ class FrontierArchive:
         self.selected: dict = {}    # cell -> times it was chosen as an episode start
         self.states: dict = {}      # cell -> emulator bytes
         self.order: list = []       # insertion order (newest last) for eviction protection
+        # Productivity (off = rarity-only selection): a cell whose episodes keep discovering NOTHING new (a walled-off pocket, a
+        # dead end) is down-weighted; a cell that led to new cells is favoured.  Generic: no map knowledge.
+        self.productivity = bool(productivity)
+        self.failures: dict = {}    # cell -> episodes started there that discovered no new cell
+        self.yield_: dict = {}      # cell -> new cells discovered in episodes started there
+        self.active = None          # cell the running episode started from (None = a normal start)
+        self.found = 0              # new cells discovered since that episode started
 
     def observe(self, cell) -> bool:
         """Count one step on ``cell``; True when this is the first time the worker has ever stood there."""
@@ -50,6 +57,7 @@ class FrontierArchive:
             return
         self.states[cell] = bytes(data)
         self.order.append(cell)
+        self.found += 1
         while len(self.states) > self.cap:
             # evict the most-visited cell, never the one just added
             victim = max((c for c in self.order[:-1]), key=lambda c: self.visits.get(c, 0), default=None)
@@ -62,10 +70,24 @@ class FrontierArchive:
         return len(self.states)
 
     def weight(self, cell) -> float:
-        return 1.0 / math.sqrt(max(1, self.visits.get(cell, 1))) / math.sqrt(1 + self.selected.get(cell, 0))
+        w = 1.0 / math.sqrt(max(1, self.visits.get(cell, 1))) / math.sqrt(1 + self.selected.get(cell, 0))
+        if self.productivity:
+            w *= (1.0 + math.sqrt(self.yield_.get(cell, 0))) / (1.0 + 2.0 * self.failures.get(cell, 0))
+        return w
+
+    def _close_episode(self) -> None:
+        """Credit the previous episode's start cell with what it found (called at the next reset)."""
+        if self.productivity and self.active is not None:
+            if self.found == 0:
+                self.failures[self.active] = self.failures.get(self.active, 0) + 1
+            else:
+                self.yield_[self.active] = self.yield_.get(self.active, 0) + self.found
+        self.active = None
+        self.found = 0
 
     def maybe_pick(self, rng):
         """With probability ``prob`` (and a non-empty archive) return ``'frontier:<cell>'`` for the next episode start, else None."""
+        self._close_episode()
         if not self.states or float(rng.random()) >= self.prob:
             return None
         cells = sorted(self.states)
@@ -79,6 +101,7 @@ class FrontierArchive:
                 chosen = c
                 break
         self.selected[chosen] = self.selected.get(chosen, 0) + 1
+        self.active = chosen
         return FRONTIER_PREFIX + cell_key(chosen)
 
     def load_key(self, key: str):

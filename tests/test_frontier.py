@@ -190,3 +190,49 @@ def test_evaluation_never_uses_the_frontier_archive(monkeypatch):
     with pytest.raises(Stop):
         ev.sampled_eval_main(args)
     assert seen["frontier_prob"] == 0.0
+
+# ------------------------------------------------------------------ productivity-aware selection
+
+def test_productivity_downweights_dead_ends_and_favours_cells_that_led_to_discoveries():
+    rng = np.random.default_rng(1)
+    a = FrontierArchive(cap=8, prob=1.0, productivity=True)
+    dead, good = (24, 3, 1, 1), (24, 3, 2, 2)
+    for c in (dead, good):
+        a.observe(c)
+        a.add(c, b"s")
+    a.found = 0
+    # three episodes started on `dead` that found nothing; three on `good` that each found two new cells
+    for _ in range(3):
+        a.active = dead
+        a._close_episode()
+        a.active = good
+        a.found = 2
+        a._close_episode()
+    assert a.failures[dead] == 3 and a.yield_[good] == 6
+    assert a.weight(good) > 5 * a.weight(dead)
+    import copy
+    # one pick from identical archive states (consecutive picks with no discoveries would, correctly, count as failures)
+    picks = [copy.deepcopy(a).maybe_pick(rng) for _ in range(200)]
+    assert sum(p.endswith("24_3_2_2") for p in picks) / len(picks) > 0.9
+
+
+def test_productivity_off_is_the_rarity_only_behaviour():
+    a, b = FrontierArchive(prob=1.0), FrontierArchive(prob=1.0, productivity=False)
+    for arch in (a, b):
+        arch.observe((1, 1, 1, 1)); arch.add((1, 1, 1, 1), b"s")
+        arch.active = (1, 1, 1, 1)
+        arch._close_episode()
+    assert a.failures == {} and a.weight((1, 1, 1, 1)) == b.weight((1, 1, 1, 1))
+
+
+def test_discoveries_in_an_episode_are_credited_to_its_start_cell_at_the_next_reset():
+    rng = np.random.default_rng(2)
+    a = FrontierArchive(prob=1.0, productivity=True)
+    a.observe((24, 3, 5, 5)); a.add((24, 3, 5, 5), b"s")
+    a.found = 0
+    first = a.maybe_pick(rng)                        # episode starts at (24,3,5,5)
+    assert a.active == (24, 3, 5, 5)
+    a.observe((24, 3, 6, 5)); a.add((24, 3, 6, 5), b"s")   # the episode discovers one new cell
+    a.maybe_pick(rng)                                # next reset closes the episode
+    assert a.yield_[(24, 3, 5, 5)] == 1 and not a.failures
+
