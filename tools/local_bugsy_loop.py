@@ -1,8 +1,8 @@
 """Local PPO-only development loop. STOP halts between updates; no automatic code/weight edits.
 
 Run with the repository's Python environment: python -m tools.local_bugsy_loop.
-Development seeds are inspected each round. Reserved held-out seeds are evaluated
-once on cooperative stop and never used to select or tune a candidate here.
+Development seeds are inspected each round. Reserved held-out seeds are never
+consumed by this loop. STOP saves the current training job and launches no new job.
 """
 from __future__ import annotations
 import hashlib
@@ -35,6 +35,10 @@ def write(path, data):
 
 
 def main():
+    import argparse
+    parser = argparse.ArgumentParser()
+    parser.add_argument('--resume', action='store_true')
+    args = parser.parse_args()
     OUT.mkdir(parents=True, exist_ok=True)
     lock = OUT / 'RUNNING.lock'
     with lock.open('x') as f:
@@ -58,19 +62,25 @@ def main():
                     'dependencies': {k: importlib.metadata.version(k) for k in ('torch', 'numpy', 'pyboy')},
                     'python': sys.version, 'development_seeds': [10101, 10102],
                     'reserved_heldout_seeds': [50001, 50002], 'config_template': config}
-        write(OUT / 'manifest.json', manifest)
+        manifest_path = OUT / 'manifest.json'
+        if manifest_path.exists():
+            shutil.copy2(manifest_path, OUT / ('manifest-before-' + datetime.now(timezone.utc).strftime('%Y%m%dT%H%M%S') + '.json'))
+        write(manifest_path, manifest)
         latest = ROOT / 'logs' / 'bugsy-baseline-latest.pt'
-        if latest.exists():
+        if latest.exists() and not args.resume:
             raise RuntimeError('Existing loop checkpoint: explicit restart/resume audit required')
         round_number = 0
         parent = None
+        if args.resume:
+            round_number = max(int(p.name.split('-')[1]) for p in OUT.glob('round-*-config.json'))
+            parent = digest(latest)
         while not STOP.exists():
             if code_hashes() != frozen_code:
                 raise RuntimeError('Source changed during run; stopped to preserve experiment identity')
             if shutil.disk_usage(ROOT).free < 20 * 1024**3:
                 raise RuntimeError('Less than 20 GiB free disk space')
             round_number += 1
-            config.update(updates=40 * round_number, save_path=str(latest),
+            config.update(updates=40, save_path=str(latest),
                           run_id=f'bugsy-baseline-{round_number:04d}',
                           trace_path=str(OUT / f'round-{round_number:04d}-steps.jsonl'))
             config_path = OUT / f'round-{round_number:04d}-config.json'
@@ -96,9 +106,6 @@ def main():
             report(development_successes=sum(bool(e['task_success']) for e in episodes),
                    development_episodes=len(episodes),
                    development_milestones=[e.get('bugsy_ledger') for e in episodes])
-        if parent is not None:
-            report(phase='final_heldout_evaluation')
-            evaluate(latest, config_path, 50001, 'final-heldout')
         report(phase='stopped', checkpoint_sha256=parent)
     except Exception as exc:
         report(phase='failed', error=str(exc))
