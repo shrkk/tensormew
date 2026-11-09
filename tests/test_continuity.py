@@ -365,6 +365,7 @@ def test_sampled_evaluation_reports_frames_decisions_and_provenance(tmp_path):
     assert ep["decisions"] == ep["steps"] == 6 and ep["model_calls"] == 0
     assert ep["frames"] >= 20 * 6, "every strict action consumes at least 20 emulator frames"
     assert ep["task_success"] is False and ep["end_reason"] == "time_limit"
+    assert ep["whiteout_events"] == 0   # counted from the -15 reward term, so it also works when whiteout does not end the episode
 
 
 # ---------------------------------------------------------------- end to end: trainer interrupted vs uninterrupted

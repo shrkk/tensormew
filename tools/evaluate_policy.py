@@ -446,6 +446,7 @@ def run_sampled_episode(worker, net, seed: int, device: str = "cpu") -> dict:
     ms_steps: dict[str, int] = {}
     steps = lowhp_out = heal_events = items_used = 0
     frames = 0   # emulator frames consumed by the episode's decisions (turns, warps, dialogue and battle included)
+    whiteout_events = 0   # every whole-party faint (the -15 term), counted even when it does not end the episode
     heal_reward = 0.0
     prev_items = heal_item_count(worker.reader.parse(worker.emu.frame))
     min_lead = 1.0
@@ -474,6 +475,8 @@ def run_sampled_episode(worker, net, seed: int, device: str = "cpu") -> dict:
         for m_idx, m_steps, _base in (info.get("ms_new") or []):
             ms_steps.setdefault(str(int(m_idx)), int(m_steps))
         comps = info.get("reward_components") or {}
+        if comps.get("whiteout", 0.0) < 0:
+            whiteout_events += 1
         if comps.get("heal", 0.0) > 0:
             heal_events += 1
             heal_reward += float(comps["heal"])
@@ -491,7 +494,8 @@ def run_sampled_episode(worker, net, seed: int, device: str = "cpu") -> dict:
             prev_items = items
     best = info.get("ended_best_path")
     return {"seed": int(seed), "steps": steps, "decisions": steps, "frames": frames,
-            "model_calls": steps if net is not None else 0, "task_target": info.get("task_target", "falkner"),
+            "model_calls": steps if net is not None else 0, "whiteout_events": whiteout_events,
+            "task_target": info.get("task_target", "falkner"),
             "task_success": bool(info.get("task_success", False)), "start_progress": start_progress, "best_path": best,
             "bugsy_ledger": info.get("bugsy_ledger"),
             "gain": (None if best is None or start_progress is None else float(best) - float(start_progress)),
