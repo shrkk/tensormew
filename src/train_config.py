@@ -101,6 +101,10 @@ class TrainConfig:
     snapshot_every: int = 0      # immutable weights-only snapshot every N completed updates (plus update 0); 0 = off
     generation_every: int = 0    # full continuation checkpoint every N completed updates (always also at stop / budget end); 0 = only at the end
     min_free_gib: float = 0.0    # halt visibly when free disk on the save volume drops below this (0 = guard off)
+    # Multiplier on the per-tile revisit ("loop") step penalty, which grows to -0.08/step once a tile has been visited ~30 times.
+    # 1.0 = the historical behaviour.  Unlike ``disable_loop_penalty`` (which only acts when the route-progress oracle is on),
+    # this works in strict runs.  An ablation knob: 0 removes the term entirely.
+    loop_penalty_scale: float = 1.0
     lr_schedule_updates: int = 0  # global horizon of the lr decay in updates; 0 = start_update + updates (the run's own budget)
     # starts / sharing
     start_states: list[str] = field(default_factory=list)
@@ -326,6 +330,8 @@ class TrainConfig:
                 errs.append(f"{key} must be >= 0 (got {getattr(self, key)})")
         if self.min_free_gib < 0:
             errs.append(f"min_free_gib must be >= 0 (got {self.min_free_gib})")
+        if self.loop_penalty_scale < 0:
+            errs.append(f"loop_penalty_scale must be >= 0 (got {self.loop_penalty_scale})")
         if (self.snapshot_every or self.generation_every) and not self.control_dir:
             errs.append("snapshot_every / generation_every need control_dir")
         p = self.ppo

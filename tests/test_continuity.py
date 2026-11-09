@@ -175,6 +175,34 @@ def test_failed_write_leaves_previous_generation_current(tmp_path):
     assert read_generation(tmp_path)[0] == good
 
 
+@needs_rom
+def test_loop_penalty_scale_works_in_strict_runs_and_default_is_unchanged():
+    """``disable_loop_penalty`` only acts with the route oracle on; ``loop_penalty_scale`` must work in strict runs."""
+    import tools.train_deep_ppo as t
+    from src.train_config import from_dict, long_v9
+    base = dict(supply_injection=False, escape_assist=False, auto_dialogue=False, task_target="falkner_strict",
+                path_progress=False, goal_potential=False, route_ckpt=False, retreat_penalty=False,
+                stagnation_penalty=False, swarm=False, battle_archive=False, battle_lowhp_weight=0,
+                disable_bump_penalty=False, disable_loop_penalty=False,
+                dwell_exempt_loop=False)   # the below-level-target exemption would zero the term and hide the scale
+    assert from_dict(base, long_v9()).loop_penalty_scale == 1.0
+    out = {}
+    for scale in (1.0, 0.5, 0.0):
+        cfg = from_dict({**base, "loop_penalty_scale": scale}, long_v9())
+        w = t.EnvWorker(0, ["new_bark_outside"], 50, t.worker_env_cfg(cfg, None))
+        try:
+            w.reset()
+            st = w.reader.parse(w.emu.frame)
+            w.tile_visit_counts[(st.map_group, st.map_number, st.x, st.y)] = 30   # a heavily revisited tile
+            *_, info = w.step(5)                                                   # B press: stays on the same tile
+            out[scale] = info["reward_components"]["loop"]
+        finally:
+            w.close()
+    assert out[1.0] == pytest.approx(-0.08) and out[0.5] == pytest.approx(-0.04) and out[0.0] == 0.0
+    with pytest.raises(Exception):
+        from_dict({**base, "loop_penalty_scale": -1.0}, long_v9())
+
+
 # ---------------------------------------------------------------- health windows / stop gate (pure, synthetic trace)
 
 def _step(update, rs, env, battle, action, hp=((19, 19),), mask_a=True, done=False, reason=None, frames=20):

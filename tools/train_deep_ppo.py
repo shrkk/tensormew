@@ -648,6 +648,7 @@ class EnvWorker:
         self.idle_press = IdlePressTracker.from_params(cfg.get("idle_press"))
         self.disable_bump = bool(cfg.get("disable_bump_penalty", False))
         self.disable_loop = bool(cfg.get("disable_loop_penalty", False))
+        self.loop_scale = float(cfg.get("loop_penalty_scale", 1.0))   # ablation knob; 1.0 = historical behaviour
         # long_v6: repeated effect-less dialogue cost (src.dialogue_loop), OFF when cfg has no "dialogue_loop" params.
         self.dialogue_loop = DialogueLoopTracker.from_params(cfg.get("dialogue_loop"))
         # long_v7 healing care (src.heal_care; OFF when cfg has no "heal_care" params / "heal_trip_exempt").
@@ -1020,6 +1021,7 @@ class EnvWorker:
                 loop = 0.0  # needed leveling is not "looping": the per-tile revisit cost is off while grinding below target
         if self.disable_loop and self.path_progress is not None:
             loop = 0.0      # long_v5: the per-tile revisit cost made standing still (pressing A) the cheapest policy
+        loop *= self.loop_scale
         stag_pen = 0.0
         if self.stagnation is not None and self.path_progress is not None:
             # long_v6: max(dwell, stagnation) per step, never the sum: only the excess over this step's dwell charge is paid here
@@ -1773,6 +1775,7 @@ def worker_env_cfg(cfg: TrainConfig, swarm_dir: str | Path | None, battle_dir: s
         "idle_press": cfg.idle_press_params(),
         "disable_bump_penalty": cfg.disable_bump_penalty,
         "disable_loop_penalty": cfg.disable_loop_penalty,
+        "loop_penalty_scale": cfg.loop_penalty_scale,
         "explore_cap": cfg.explore_cap_override(),
         "heal_reward": cfg.heal_reward,
         "heal_scale": cfg.heal_reward_scale,
