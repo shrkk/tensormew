@@ -46,8 +46,10 @@ Training-only environment features (all off in ``--config legacy``):
 from __future__ import annotations
 
 import argparse
+import contextlib
 import dataclasses
 import inspect
+import random
 import math
 import json
 import multiprocessing as mp
@@ -64,6 +66,9 @@ import torch
 import torch.optim as optim
 
 from src.anti_farm import speed_multiplier
+from src.continuation import GenerationError, check_embedded, read_generation, sha256_file, write_generation
+from src.run_control import (Counters, RunHalted, RunLock, StatusWriter, check_disk, code_fingerprint, config_identity,
+                             fingerprint_digest, lr_for_update, prevent_sleep, stop_requested, utc_now, write_run_manifest)
 from src.battle_obs import equip_supplies, heal_item_count
 from src.periodic_eval import EVAL_STATE, aggregate, episode_record, is_eval_update
 from src.battle_mask import N_ACTIONS as MASK_N_ACTIONS
@@ -795,6 +800,7 @@ class EnvWorker:
         self._step0 = self.steps
         self._first_episode = False
         self._jitter(data)
+        self.last_reset_frames = int(self.emu.frame)   # frames spent in this reset (start jitter); load_state zeroes the counter
         st = self.reader.parse(self.emu.frame)
         # Seed the caught species from the party so the starter does not pay a catch bonus later.
         from src.bugsy_task import BugsyLedger, falkner_goal_eligible
@@ -1136,6 +1142,7 @@ class EnvWorker:
             "ep_len": int(self.ep_len),
             "cur_furthest": int(self._ep_furthest),   # furthest story stage of the running episode (0 = none yet)
             "executed_action": exec_idx,
+            "reset_frames": int(getattr(self, "last_reset_frames", 0)) if done else 0,   # frames of the reset that followed this step
             # Dashboard fun-facts source: already-parsed RAM only (no extra reads); aggregated in LiveFeed.
             "fun": {
                 "bm": int(st_now.battle_mode),
@@ -1185,6 +1192,30 @@ class EnvWorker:
             self.emu.tick(12, render=False)
         self.blocked_count = 0
 
+    # -- exact continuation (src.continuation): everything that evolves during an episode, plus the emulator bytes.
+    # Not captured: the archive directories' contents (strict runs have swarm/battle/route archives OFF; with them on the
+    # files themselves live on disk but their in-memory rotation counters are not guaranteed identical).
+    _SNAPSHOT_EXCLUDE = frozenset({"emu", "reader", "stepper", "macros", "registry", "_bytes", "archive", "battle_archive",
+                                   "route_archive", "selector", "rng"})
+
+    def snapshot(self) -> bytes:
+        """Serialized world state of this worker at a completed-step boundary (trusted, local use only)."""
+        import pickle
+        attrs = {k: v for k, v in vars(self).items() if k not in self._SNAPSHOT_EXCLUDE}
+        return pickle.dumps({"attrs": attrs, "rng": self.rng.bit_generator.state, "selector_count": self.selector.count,
+                             "emu": self.emu.save_state(), "frame": self.emu.frame}, protocol=5)
+
+    def restore(self, blob: bytes) -> None:
+        """Inverse of ``snapshot``.  Loads the emulator WITHOUT re-applying training options (they are already in the
+        saved bytes) and never re-awards anything: ledgers/seen-sets come back exactly as saved."""
+        import pickle
+        d = pickle.loads(blob)
+        self.emu.load_state(d["emu"], apply_options=False)
+        self.emu.set_frame_counter(d["frame"])
+        vars(self).update(d["attrs"])
+        self.rng.bit_generator.state = d["rng"]
+        self.selector.count = d["selector_count"]
+
     def close(self) -> None:
         self.emu.close()
 
@@ -1207,6 +1238,11 @@ def _worker_fn(pipe, seed: int, start_states: list[str], max_steps: int, env_cfg
                 pipe.send(pack_mask(worker.last_mask))
             elif cmd == "INTRINSIC":   # no reply: the parent does not wait for one
                 worker.set_intrinsic_scale(float(data_arg))
+            elif cmd == "SNAPSHOT":    # exact-continuation checkpoint of this worker's world
+                pipe.send(worker.snapshot())
+            elif cmd == "RESTORE":
+                worker.restore(data_arg)
+                pipe.send("RESTORED")
             elif cmd == "CLOSE":
                 break
     except (EOFError, KeyboardInterrupt):
@@ -1373,6 +1409,32 @@ class VectorEnv:
         """Broadcast the exploration-payment weight to every worker (fire and forget; applies from their next step)."""
         for i in range(len(self.pipes)):
             self._send(i, ("INTRINSIC", float(scale)))
+
+    def snapshot(self) -> list[bytes]:
+        """Every worker's serialized world (call only between steps).  Workers are not advanced."""
+        try:
+            for i in range(len(self.pipes)):
+                self._send(i, ("SNAPSHOT", None))
+            return [self._recv(i) for i in range(len(self.pipes))]
+        except BaseException:
+            self.close()
+            raise
+
+    def restore(self, blobs: list[bytes], masks: np.ndarray | None = None) -> None:
+        """Put every worker back into a saved world instead of calling ``reset``."""
+        if len(blobs) != len(self.pipes):
+            raise ValueError(f"snapshot has {len(blobs)} workers, this run has {len(self.pipes)}")
+        try:
+            for i, blob in enumerate(blobs):
+                self._send(i, ("RESTORE", blob))
+            for i in range(len(self.pipes)):
+                if self._recv(i) != "RESTORED":
+                    raise WorkerCrashed(f"env worker {i} did not confirm restore")
+        except BaseException:
+            self.close()
+            raise
+        if masks is not None:
+            self.last_masks[:] = masks
 
     def close(self):
         """Stop every worker; idempotent.  Workers that ignore CLOSE (stuck in a step) are terminated, then killed."""
@@ -1744,7 +1806,41 @@ def train(
     frame_every: int = 5,
     metrics_path: str = "logs/training_metrics.jsonl",
     minibatches_typed: bool = False,
+    resume_generation: str | None = None,
+    init_weights: str | None = None,
 ):
+    """Train.  Start modes (exactly one): fresh random init (default); ``init_weights`` = warm start from weights only with a
+    FRESH optimizer and fresh worlds; ``resume`` = legacy weights+optimizer sidecar resume (worlds restart, NOT a trajectory
+    continuation); ``resume_generation`` = verified exact continuation from a ``src.continuation`` generation."""
+    if sum(bool(x) for x in (resume, resume_generation, init_weights)) > 1:
+        raise ValueError("resume, resume_generation and init_weights are mutually exclusive start modes")
+    if init_weights and Path(init_weights).resolve() == Path(cfg.save_path).resolve():
+        raise ValueError("init_weights must not be the save path: never train into an existing checkpoint")
+    resume_kind = ("exact_generation" if resume_generation else "warm_start_fresh_optimizer" if init_weights
+                   else "weights_optimizer_only_restart" if resume else "fresh_init")
+    control = Path(cfg.control_dir) if cfg.control_dir else None
+    stop_path = cfg.stop_path or (str(control / "STOP") if control else "")
+    status = StatusWriter(control / "status.json" if control else None)
+    lock = RunLock(control / "RUNNING.lock") if control else None
+    counters = Counters()
+    if lock is not None:
+        lock.acquire()
+        status.set(lock_taken_over_from=lock.taken_over_from)   # None unless a stale lock of a dead owner was replaced
+    _sleep = prevent_sleep() if control else contextlib.nullcontext()
+    _sleep.__enter__()
+    try:
+        return _train_locked(cfg, states, resume, push_weights, batch_size, live, live_dir, runs_dir, run_id, frame_every,
+                             metrics_path, minibatches_typed, resume_generation, init_weights, resume_kind, control,
+                             stop_path, status, counters)
+    finally:
+        _sleep.__exit__(None, None, None)
+        if lock is not None:
+            lock.release()
+
+
+def _train_locked(cfg, states, resume, push_weights, batch_size, live, live_dir, runs_dir, run_id, frame_every,
+                  metrics_path, minibatches_typed, resume_generation, init_weights, resume_kind, control, stop_path,
+                  status, counters):
     device = torch.device("cuda" if torch.cuda.is_available() else "cpu")
     use_gru = cfg.recurrent
     _story.set_profile(cfg.egg_errand_route)   # milestone list, story block and observation width of this run
@@ -1753,15 +1849,66 @@ def train(
     save_path = cfg.save_path
     if resume:
         check_resume(save_path)  # raises before any worker is spawned
-    torch.manual_seed(cfg.seed)
-    np.random.seed(cfg.seed)
-    print(f"Initializing SpatialVisionPolicy training on {device} (recurrent={use_gru}, config={cfg.name})...")
+    gen_root = control / "generations" if control else None
+    snap_dir = control / "snapshots" if control else None
+    code_fp = code_fingerprint(Path(__file__).resolve().parent.parent)
+    cfg_id = config_identity(cfg)
+    prev_status = None
+    if control is not None and (control / "status.json").exists():
+        try:
+            prev_status = json.loads((control / "status.json").read_text(encoding="utf-8"))
+        except (OSError, ValueError):
+            prev_status = None
+    status.set(phase="initializing", run_id=cfg.run_id, resume_kind=resume_kind, exact_continuation=bool(resume_generation),
+               stop_marker=stop_path, config_sha256=cfg_id, owner_pid=os.getpid(), child_pids=[],
+               competence_established=False)
+    status.beat()
+    gen_manifest = gen_dir = None
+    if resume_generation:
+        try:
+            gen_dir, gen_manifest = read_generation(
+                resume_generation if Path(resume_generation).name != "auto" else gen_root,
+                expect_components=("policy", "optimizer", "world"))
+        except GenerationError as e:
+            raise RuntimeError(f"--resume-generation: {e}") from e
+        meta = gen_manifest["meta"]
+        if meta.get("config_sha256") != cfg_id:
+            raise RuntimeError("--resume-generation: config differs from the generation's config (exact continuation "
+                               "requires the same schedule/reward/PPO configuration; only updates/stop/trace/save paths may change)")
+        if meta.get("code_fingerprint_sha256") != fingerprint_digest(code_fp):
+            raise RuntimeError("--resume-generation: source files differ from the generation's code; refusing a non-exact "
+                               "continuation")
+        if meta.get("obs_dim") != obs_dim or meta.get("num_actions") != N_ACTIONS or meta.get("use_gru") != use_gru:
+            raise RuntimeError("--resume-generation: observation/action/recurrence schema differs from the generation")
+        if meta.get("num_envs") != num_envs or meta.get("rollout_steps") != rollout_steps:
+            raise RuntimeError("--resume-generation: envs/rollout_steps differ from the generation")
+    if gen_manifest is None:
+        torch.manual_seed(cfg.seed)   # seeded ONCE per run; exact resume restores the generator state instead
+        np.random.seed(cfg.seed)
+    print(f"Initializing SpatialVisionPolicy training on {device} (recurrent={use_gru}, config={cfg.name}, "
+          f"start={resume_kind})...")
 
     use_aux = bool(cfg.aux_loss and use_gru)
     policy = SpatialVisionPolicy(obs_dim=obs_dim, num_actions=N_ACTIONS, use_gru=use_gru, gru_hidden_dim=512,
                                  aux_heads=use_aux)
     resumed = False
     sidecar = None
+    init_parent_sha = None
+    if init_weights:
+        init_parent_sha = sha256_file(init_weights)
+        try:
+            policy = SpatialVisionPolicy.load(init_weights, device=device, override_use_gru=use_gru,
+                                              override_obs_dim=obs_dim, check_schema=True, override_aux_heads=use_aux)
+        except Exception as e:
+            raise RuntimeError(f"--init-weights: could not load '{init_weights}': {e}") from e
+        print(f"Warm start from {init_weights} (sha256 {init_parent_sha[:16]}...): weights only, FRESH optimizer, fresh worlds.")
+    if gen_manifest is not None:
+        policy_file = gen_dir / gen_manifest["components"]["policy"]["file"]
+        try:
+            policy = SpatialVisionPolicy.load(str(policy_file), device=device, override_use_gru=use_gru,
+                                              override_obs_dim=obs_dim, check_schema=True, override_aux_heads=use_aux)
+        except Exception as e:
+            raise RuntimeError(f"--resume-generation: could not load policy from {policy_file}: {e}") from e
     if resume:
         try:
             policy = SpatialVisionPolicy.load(save_path, device=device, override_use_gru=use_gru,
@@ -1786,6 +1933,22 @@ def train(
                 print(f"[resume] WARNING: could not restore optimizer state ({e}); Adam moments restart from zero.", flush=True)
         for g in optimizer.param_groups:
             g["lr"] = cfg.lr
+    gen_opt = gen_world = None
+    if gen_manifest is not None:
+        # Strict: a missing/mismatched/unloadable optimizer or world never degrades to a fresh one.
+        try:
+            gen_opt = torch.load(str(gen_dir / gen_manifest["components"]["optimizer"]["file"]), map_location=device,
+                                 weights_only=False)
+            gen_world = torch.load(str(gen_dir / gen_manifest["components"]["world"]["file"]), map_location="cpu",
+                                   weights_only=False)
+            check_embedded("optimizer", gen_opt, gen_manifest)
+            check_embedded("world", gen_world, gen_manifest)
+            optimizer.load_state_dict(gen_opt["optimizer"])
+        except GenerationError as e:
+            raise RuntimeError(f"--resume-generation: {e}") from e
+        except Exception as e:
+            raise RuntimeError(f"--resume-generation: could not restore optimizer/world: {e}") from e
+        print(f"[resume-generation] verified {gen_dir.name} (update {gen_manifest['update']}); restoring exactly.", flush=True)
     print(f"Policy ready with {policy.param_count:,} trainable parameters.")
 
     hp = PPOHParams(**dataclasses.asdict(cfg.ppo))
@@ -1806,6 +1969,35 @@ def train(
     scaler = RunningReturnScaler(num_envs, hp.gamma) if cfg.reward_scale == "running_std" else None
     start_update = 0
     best_reward = -float("inf")  # best smoothed (mean of the last BEST_WINDOW updates) raw mean episode reward
+    recent_scores: deque[float] = deque(maxlen=BEST_WINDOW)
+    reward_window_8: deque[float] = deque(maxlen=REWARD_CYCLE_WINDOW)  # mean over 8 updates: hides the lockstep cycle
+    last_intrinsic = 1.0
+    ms_stats = MilestoneStats()
+    split_stats = SourceSplitStats() if cfg.source_split_metrics else None   # long_v7: learned vs head start, by reset source
+    if gen_opt is not None:
+        aux = gen_opt["trainer"]
+        start_update = int(gen_manifest["update"]) + 1
+        progress.load_state_dict(aux["progress"])
+        if scaler is not None:
+            scaler.load_state_dict(aux["reward_scaler"])
+        if entropy_guard is not None:
+            entropy_guard.__dict__.update(aux["entropy_guard"])
+        last_entropy = aux["last_entropy"]
+        best_reward = aux["best_reward"] if aux["best_reward"] is not None else best_reward
+        recent_scores.extend(aux["recent_scores"])
+        reward_window_8.extend(aux["reward_window_8"])
+        last_intrinsic = aux["last_intrinsic"]
+        ms_stats = aux["ms_stats"]
+        split_stats = aux["split_stats"]
+        counters.load(aux["counters"])
+        # Decisions taken after this generation by the interrupted process (known from its last heartbeat) are discarded
+        # by exact resume: record them instead of pretending they never happened.
+        counters.external_restarts += 1
+        prev_decisions = int(((prev_status or {}).get("counters") or {}).get("train_decisions", 0))
+        if (prev_status or {}).get("run_id") == cfg.run_id and prev_decisions > counters.train_decisions:
+            counters.abandoned_decisions += prev_decisions - counters.train_decisions
+            counters.abandoned_episodes_in_progress += num_envs
+        print(f"[resume-generation] continuing at update {start_update}", flush=True)
     if sidecar is not None:
         start_update = int(sidecar.get("update", -1)) + 1
         if "progress" in sidecar:
@@ -1906,13 +2098,29 @@ def train(
         print(f"[egg errand] {_p.count} milestones {list(_p.names)} | story block {_p.feature_dim} floats, observation {obs_dim} | "
               f"path phases {list(_p.phase_steps)} = {_p.path_steps} steps (egg tile -> Elm's lab -> Falkner) | "
               f"story reward {_p.total_reward:g} | level targets {list(cfg.dwell_level_targets)}", flush=True)
+    # STOP / low disk before any emulator process is launched: nothing new starts, and the terminal status says why.
+    if stop_requested(stop_path):
+        print(f"[stop] stop marker present before launch: {stop_path}; no work started", flush=True)
+        status.beat(phase="stopped", stop_reason="stop_marker_before_launch", last_completed_update=None)
+        return
+    try:
+        check_disk(save_path if control is None else control, cfg.min_free_gib)
+    except RunHalted as exc:
+        status.beat(phase="halted", stop_reason=exc.reason, halt_reason=exc.reason, halt_detail=exc.detail)
+        raise
     vec_env = VectorEnv(num_envs=num_envs, start_states=states, max_steps=cfg.max_steps,
                         env_cfg=worker_env_cfg(cfg, swarm_dir, battle_dir, route_dir))
-    screens_cur, rams_cur = vec_env.reset()
-
     hidden = policy.gru_hidden_dim if use_gru else 512
-    hx = torch.zeros(1, num_envs, hidden, device=device) if policy.use_gru else None
-    if cfg.warmup_rollout > 0 and scaler is not None and not (sidecar is not None and "reward_scaler" in sidecar):
+    if gen_world is not None:
+        # Exact continuation: workers go back into their saved worlds; no reset, no new episode, no zeroed recurrence.
+        vec_env.restore(gen_world["workers"], masks=gen_world["masks"])
+        screens_cur, rams_cur = gen_world["screens"], gen_world["rams"]
+        hx = gen_world["hx"].to(device) if policy.use_gru else None
+    else:
+        screens_cur, rams_cur = vec_env.reset()
+        hx = torch.zeros(1, num_envs, hidden, device=device) if policy.use_gru else None
+    if (cfg.warmup_rollout > 0 and scaler is not None and gen_world is None
+            and not (sidecar is not None and "reward_scaler" in sidecar)):
         try:
             screens_cur, rams_cur, hx, wu = warmup_scaler(policy, vec_env, scaler, screens_cur, rams_cur, hx,
                                                           cfg.warmup_rollout, rollout_steps, device)
@@ -1975,17 +2183,98 @@ def train(
     if cfg.trace_path:
         from src.experiment_trace import ExperimentTrace
         trace = ExperimentTrace(cfg.trace_path, json.loads(cfg.to_json()))
+        if gen_manifest is not None:
+            # The trace is append-only.  Entries of the interrupted process with update >= start_update were abandoned
+            # by this exact resume and will be re-generated: readers must drop them (they precede this marker).
+            trace.write({"event": "resume", "kind": resume_kind, "from_update": start_update,
+                         "generation_id": gen_manifest["generation_id"],
+                         "abandoned_updates_ge": start_update})
 
-    ms_stats = MilestoneStats()
-    split_stats = SourceSplitStats() if cfg.source_split_metrics else None   # long_v7: learned vs head start, by reset source
     # Fastest-to-milestone records (steps from the base start state); rebuilt from this run's history.jsonl on resume.
     ms_records = (MilestoneRecords.from_history(history_dir / "history.jsonl")
-                  if (resumed and history_dir is not None) else MilestoneRecords())
-    last_intrinsic = 1.0
-    recent_scores: deque[float] = deque(maxlen=BEST_WINDOW)
-    reward_window_8: deque[float] = deque(maxlen=REWARD_CYCLE_WINDOW)  # mean over 8 updates: hides the lockstep cycle
+                  if ((resumed or gen_manifest is not None) and history_dir is not None) else MilestoneRecords())
     last_done: int | None = None  # last completed update index
     last_saved: int | None = None
+    last_snapshot: dict | None = None
+    last_generation: dict | None = None
+    last_eval_meta: dict | None = None
+    halted: RunHalted | None = None
+    start_wall = time.time()
+    run_manifest_path = None
+    if control is not None:
+        run_manifest_path = write_run_manifest(
+            control, cfg, code_fp, resume_kind=resume_kind, init_parent_sha256=init_parent_sha,
+            generation=(gen_manifest or {}).get("generation_id"), lock_takeover=status.data.get("lock_taken_over_from"))
+
+    def _gen_meta(update_idx: int) -> dict:
+        return {"config_sha256": cfg_id, "code_fingerprint_sha256": fingerprint_digest(code_fp), "obs_dim": obs_dim,
+                "num_actions": N_ACTIONS, "use_gru": bool(use_gru), "num_envs": num_envs, "rollout_steps": rollout_steps,
+                "counters": counters.state(), "run_id": cfg.run_id, "resume_kind": resume_kind}
+
+    def save_generation_now(update_idx: int) -> Path:
+        """Exact-continuation checkpoint at a COMPLETED-update boundary (no outstanding PPO batch)."""
+        nonlocal last_generation
+        blobs = vec_env.snapshot()
+        torch_rng = {"cpu": torch.get_rng_state(), "cuda": torch.cuda.get_rng_state_all() if torch.cuda.is_available() else None,
+                     "numpy": np.random.get_state(), "python": random.getstate()}
+        trainer_state = {
+            "progress": progress.state_dict(),
+            "reward_scaler": scaler.state_dict() if scaler is not None else None,
+            "entropy_guard": dict(entropy_guard.__dict__) if entropy_guard is not None else None,
+            "last_entropy": last_entropy, "best_reward": best_reward if math.isfinite(best_reward) else None,
+            "recent_scores": list(recent_scores), "reward_window_8": list(reward_window_8),
+            "last_intrinsic": last_intrinsic, "ms_stats": ms_stats, "split_stats": split_stats,
+            "counters": counters.state(), "rng": torch_rng,
+        }
+        world = {"workers": blobs, "screens": screens_cur, "rams": rams_cur,
+                 "masks": vec_env.last_masks.copy(), "hx": hx.detach().cpu() if hx is not None else None}
+
+        def w_policy(path, gid):
+            policy.save(path)
+
+        def w_opt(path, gid):
+            torch.save({"generation_id": gid, "optimizer": optimizer.state_dict(), "trainer": trainer_state,
+                        "update": int(update_idx)}, path)
+
+        def w_world(path, gid):
+            torch.save({"generation_id": gid, **world}, path)
+
+        gdir = write_generation(gen_root, update_idx, {"policy": w_policy, "optimizer": w_opt, "world": w_world},
+                                _gen_meta(update_idx))
+        last_generation = {"dir": str(gdir), "update": int(update_idx)}
+        if trace is not None:
+            trace.write({"event": "generation", "update": int(update_idx), "dir": gdir.name,
+                         "counters": counters.state()})
+        return gdir
+
+    def write_snapshot(n_completed: int) -> None:
+        """Immutable weights-only snapshot named by completed updates.  Never overwritten: evaluations read these."""
+        nonlocal last_snapshot
+        snap_dir.mkdir(parents=True, exist_ok=True)
+        target = snap_dir / f"update-{n_completed:06d}.pt"
+        if not target.exists():
+            _atomic(policy.save, target)
+            with (snap_dir / "snapshots.jsonl").open("a", encoding="utf-8") as f:
+                f.write(json.dumps({"completed_updates": n_completed, "path": str(target), "sha256": sha256_file(target),
+                                    "train_decisions": counters.train_decisions, "train_frames": counters.train_frames,
+                                    "utc": utc_now()}) + "\n")
+        last_snapshot = {"completed_updates": n_completed, "path": str(target), "sha256": sha256_file(target)}
+
+    def beat(phase: str, **extra_fields) -> None:
+        done_n = start_update if last_done is None else last_done + 1   # completed updates of the whole lineage
+        status.beat(
+            phase=phase, child_pids=[p.pid for p in getattr(vec_env, "procs", []) if p.is_alive()],
+            last_completed_update=last_done, completed_updates_total=done_n,
+            budget={"updates_this_invocation": updates, "completed_this_invocation": 0 if last_done is None else last_done + 1 - start_update,
+                    "remaining": max(0, start_update + updates - done_n)},
+            counters=counters.state(), goal_counts={"falkner_success_episodes": counters.episodes_ended.get("falkner_success", 0),
+                                                    "bugsy_success_episodes": counters.episodes_ended.get("bugsy_success", 0)},
+            last_snapshot=last_snapshot, last_generation=last_generation, last_evaluation=last_eval_meta,
+            wall_seconds=round(time.time() - start_wall, 1), **extra_fields)
+
+    if snap_dir is not None and cfg.snapshot_every:
+        write_snapshot(start_update)   # update-<start>.pt: the exact starting weights of this run
+    beat("training")
 
     def save_latest(update_idx: int) -> None:
         nonlocal last_saved
@@ -1996,10 +2285,28 @@ def train(
         save_checkpoint(policy, optimizer, save_path, update_idx, progress.value, extra=extra)
         last_saved = update_idx
 
+    if gen_opt is not None:   # last: nothing above this line consumes the restored generators
+        rng_state = gen_opt["trainer"]["rng"]
+        torch.set_rng_state(rng_state["cpu"].cpu())
+        if rng_state["cuda"] is not None and torch.cuda.is_available():
+            torch.cuda.set_rng_state_all([s.cpu() for s in rng_state["cuda"]])
+        np.random.set_state(rng_state["numpy"])
+        random.setstate(rng_state["python"])
+    stop_reason = None
     try:
         for update in range(start_update, start_update + updates):
-            if cfg.stop_path and Path(cfg.stop_path).exists():
-                print(f"[stop] stop marker found: {cfg.stop_path}", flush=True)
+            if stop_requested(stop_path):
+                print(f"[stop] stop marker found: {stop_path}", flush=True)
+                stop_reason = "stop_marker"
+                break
+            try:   # a halt at the head of an update is at a completed-update boundary: it can still save exactly
+                check_disk(save_path if control is None else control, cfg.min_free_gib)
+                if control is not None and code_fingerprint(Path(__file__).resolve().parent.parent) != code_fp:
+                    raise RunHalted("source_changed", "src/tools files changed while the run was live")
+            except RunHalted as exc:
+                halted = exc
+                stop_reason = exc.reason
+                print(f"[halt] {exc}", flush=True)
                 break
             t0 = time.time()
             buf_values.zero_(), buf_rewards.zero_(), buf_dones.zero_(), buf_trunc.zero_(), buf_boot.zero_()
@@ -2017,10 +2324,13 @@ def train(
             if abs(iw - last_intrinsic) > 1e-9:   # workers only hear about a change (never for long_v3)
                 vec_env.set_intrinsic_scale(iw)
                 last_intrinsic = iw
-            if cfg.lr_end_frac < 1.0:  # linear lr decay over this invocation's updates
-                lr_now = cfg.lr * (1.0 - (1.0 - cfg.lr_end_frac) * min(1.0, (update - start_update) / max(1, updates)))
+            if cfg.lr_end_frac < 1.0:  # linear lr decay as a function of the GLOBAL update (no per-invocation sawtooth)
+                lr_now = lr_for_update(cfg.lr, cfg.lr_end_frac, update, cfg.lr_schedule_updates or (start_update + updates))
                 for g in optimizer.param_groups:
                     g["lr"] = lr_now
+            elif gen_opt is not None or resumed:   # constant lr: never inherit a decayed value from a restored optimizer
+                for g in optimizer.param_groups:
+                    g["lr"] = cfg.lr
 
             # 1. Collect rollouts with batched inference
             policy.eval()
@@ -2056,6 +2366,8 @@ def train(
                 phase["infer"] += _t2 - _t
                 screens_next, rams_next, rews, dones, map_counts, badges = vec_env.step(actions_np)
                 infos = vec_env.last_infos
+                for _i, _inf in enumerate(infos):
+                    counters.add_step(_inf, bool(dones[_i]))
                 if trace is not None:
                     trace.step(update, step, actions_np, dist.probs.detach().cpu().numpy(),
                                val.detach().cpu().numpy(), logp_t.detach().cpu().numpy(), rams_cur,
@@ -2174,6 +2486,8 @@ def train(
             if evaluator is not None and is_eval_update(update, cfg.eval_every):   # long_v8: after dt, so dt excludes it
                 try:
                     eval_payload = evaluator.run(policy, update)
+                    last_eval_meta = {"evaluated_update": int(update), "source": "periodic_in_process",
+                                      "note": "evaluates the policy as of this update only"}
                     print(f"[eval] update {update}: best progress mean {eval_payload['eval_best_progress_mean']} / max "
                           f"{eval_payload['eval_best_progress_max']}, white-outs {eval_payload['eval_whiteout_frac']:.0%}, "
                           f"return {eval_payload['eval_return_mean']} ({cfg.eval_episodes} x {cfg.eval_max_steps} steps from "
@@ -2285,9 +2599,28 @@ def train(
                 save_best(policy, save_path)
             if (update + 1) % SAVE_EVERY == 0:
                 save_latest(update)
+            # Boundary artifacts: a completed update, no outstanding PPO batch.
+            if snap_dir is not None and cfg.snapshot_every and (update + 1) % cfg.snapshot_every == 0:
+                write_snapshot(update + 1)
+            if gen_root is not None and cfg.generation_every and (update + 1) % cfg.generation_every == 0:
+                save_generation_now(update)
+            beat("training")
+        else:
+            stop_reason = "budget_exhausted"
 
         if last_done is not None and last_saved != last_done:
             save_latest(last_done)  # the final update is always saved
+        if gen_root is not None and last_done is not None and (
+                last_generation is None or last_generation["update"] != last_done):
+            try:
+                save_generation_now(last_done)   # stop / halt / budget end: always leave an exact continuation point
+            except Exception as e:
+                print(f"[checkpoint] WARNING: final generation save failed: {e}", flush=True)
+        beat({"stop_marker": "stopped", "budget_exhausted": "completed"}.get(stop_reason, "halted"),
+             stop_reason=stop_reason, halt_reason=halted.reason if halted else None,
+             halt_detail=halted.detail if halted else None)
+        if halted is not None:
+            raise halted
         print(f"\nTraining completed! Latest checkpoint: {save_path}; best (smoothed reward {best_reward:.2f}): {best_path(save_path)}", flush=True)
         if push_weights:
             try:
@@ -2295,6 +2628,13 @@ def train(
                 sync_and_push(push=True, message=f"feat(weights): deep_policy.pt retrained (updates={updates}, rew={best_reward:.2f})")
             except Exception as e:
                 print(f"[Warning] Could not auto-push weights: {e}", flush=True)
+    except BaseException as exc:
+        if not isinstance(exc, RunHalted):   # a halt already wrote its own terminal status
+            try:
+                beat("failed", error=f"{type(exc).__name__}: {exc}"[:2000])
+            except Exception:
+                pass
+        raise
     finally:
         if last_done is not None and last_saved != last_done:  # the final update, Ctrl+C or an exception
             try:
@@ -2346,6 +2686,11 @@ def build_parser() -> argparse.ArgumentParser:
     parser.add_argument("--no-recurrent", action="store_const", const=False, dest="recurrent")
     parser.add_argument("--save", default=None, help="checkpoint path (default: config save_path)")
     parser.add_argument("--resume", action="store_true", default=False, help="warm-start from --save if it exists (and restore its optimizer sidecar)")
+    parser.add_argument("--resume-generation", default=None, metavar="DIR|auto",
+                        help="exact continuation from a verified generation (a gen-* dir, a generations root, or 'auto' = <control_dir>/generations); "
+                             "restores policy, optimizer, RNG streams, emulators, GRU state, ledgers and counters. Mutually exclusive with --resume/--init-weights")
+    parser.add_argument("--init-weights", default=None, metavar="PT",
+                        help="warm start: load these weights only, FRESH optimizer and fresh worlds (not a continuation); refuses to train into the same path")
     parser.add_argument("--push-weights", action="store_true", default=False, help="commit and push updated weights to the current branch on completion (off by default)")
     parser.add_argument("--live", action="store_true", default=True, help="write live telemetry for tools.dashboard (default on)")
     parser.add_argument("--no-live", action="store_false", dest="live")
@@ -2399,7 +2744,7 @@ def build_config(args: argparse.Namespace) -> TrainConfig:
 
 
 def main(argv=None):
-    # The monitor prints π and status emoji; legacy Windows consoles (cp1252) would crash on them.
+    # The monitor prints Ï€ and status emoji; legacy Windows consoles (cp1252) would crash on them.
     if hasattr(sys.stdout, "reconfigure"):
         sys.stdout.reconfigure(encoding="utf-8", errors="replace")
     parser = build_parser()
@@ -2418,20 +2763,34 @@ def main(argv=None):
         except FileNotFoundError as exc:
             parser.error(str(exc))
 
-    train(
-        cfg,
-        states=states,
-        minibatches_typed=args.minibatches is not None,
-        resume=args.resume,
-        push_weights=args.push_weights,
-        batch_size=args.batch_size,
-        live=args.live,
-        live_dir=args.live_dir,
-        runs_dir=args.runs_dir or None,
-        run_id=args.run_id,
-        frame_every=args.frame_every,
-        metrics_path=args.metrics_path,
-    )
+    if args.resume_generation:
+        resume_generation = args.resume_generation
+        if resume_generation == "auto":
+            if not cfg.control_dir:
+                parser.error("--resume-generation auto needs control_dir in the config")
+            resume_generation = str(Path(cfg.control_dir) / "generations" / "auto")   # 'auto' leaf = follow CURRENT.json
+    else:
+        resume_generation = None
+    try:
+        train(
+            cfg,
+            states=states,
+            minibatches_typed=args.minibatches is not None,
+            resume=args.resume,
+            push_weights=args.push_weights,
+            batch_size=args.batch_size,
+            live=args.live,
+            live_dir=args.live_dir,
+            runs_dir=args.runs_dir or None,
+            run_id=args.run_id,
+            frame_every=args.frame_every,
+            metrics_path=args.metrics_path,
+            resume_generation=resume_generation,
+            init_weights=args.init_weights,
+        )
+    except RunHalted as exc:
+        print(f"[halted] {exc.reason}: {exc.detail}", flush=True)
+        sys.exit(3)
 
 
 if __name__ == "__main__":

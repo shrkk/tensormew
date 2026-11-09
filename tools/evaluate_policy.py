@@ -445,6 +445,7 @@ def run_sampled_episode(worker, net, seed: int, device: str = "cpu") -> dict:
     hx = None
     ms_steps: dict[str, int] = {}
     steps = lowhp_out = heal_events = items_used = 0
+    frames = 0   # emulator frames consumed by the episode's decisions (turns, warps, dialogue and battle included)
     heal_reward = 0.0
     prev_items = heal_item_count(worker.reader.parse(worker.emu.frame))
     min_lead = 1.0
@@ -468,6 +469,8 @@ def run_sampled_episode(worker, net, seed: int, device: str = "cpu") -> dict:
                 act = int(torch.distributions.Categorical(logits=logits).sample().item())
         screen, ram, _rew, done, _maps, _badges, info = worker.step(act)
         steps += 1
+        _t = info.get("transition") or {}   # captured before any reset, so a final step still counts its own frames
+        frames += max(0, int(_t.get("frame_after", 0)) - int(_t.get("frame_before", 0)))
         for m_idx, m_steps, _base in (info.get("ms_new") or []):
             ms_steps.setdefault(str(int(m_idx)), int(m_steps))
         comps = info.get("reward_components") or {}
@@ -487,7 +490,8 @@ def run_sampled_episode(worker, net, seed: int, device: str = "cpu") -> dict:
                 items_used += prev_items - items
             prev_items = items
     best = info.get("ended_best_path")
-    return {"seed": int(seed), "steps": steps, "task_target": info.get("task_target", "falkner"),
+    return {"seed": int(seed), "steps": steps, "decisions": steps, "frames": frames,
+            "model_calls": steps if net is not None else 0, "task_target": info.get("task_target", "falkner"),
             "task_success": bool(info.get("task_success", False)), "start_progress": start_progress, "best_path": best,
             "bugsy_ledger": info.get("bugsy_ledger"),
             "gain": (None if best is None or start_progress is None else float(best) - float(start_progress)),
@@ -526,6 +530,10 @@ def sampled_eval_main(args) -> int:
     ecfg.update({"stagger_episodes": False, "episode_len_jitter": 0.0, "seed": args.seed})
     worker = EnvWorker(0, [args.start_state], args.max_steps, ecfg)
     episodes = []
+    import hashlib
+    ckpt_sha = (hashlib.sha256(Path(args.checkpoint).read_bytes()).hexdigest()
+                if (args.checkpoint and not args.random_init and not getattr(args, "uniform_random", False)) else None)
+    t_eval0 = time.time()
     try:
         for i in range(args.episodes):
             ep = run_sampled_episode(worker, net, args.seed + i, args.device)
@@ -534,7 +542,13 @@ def sampled_eval_main(args) -> int:
                   f"end {ep['end_reason']} steps {ep['steps']} lowHP-out {ep['lowhp_steps_outside_battle']} "
                   f"heals {ep['heal_events']} items {ep['heal_items_used']} ({ep['seconds']}s)", flush=True)
             out = {"label": label, "start_state": args.start_state, "max_steps": args.max_steps, "seed": args.seed,
-                   "config": cfg.name, "episodes": episodes, "summary": summarize_sampled(episodes)}
+                   "config": cfg.name, "episodes": episodes, "summary": summarize_sampled(episodes),
+                   "checkpoint_sha256": ckpt_sha,   # which model these numbers evaluate (never a later checkpoint)
+                   "seeds": [e["seed"] for e in episodes],
+                   "task_successes": sum(bool(e.get("task_success")) for e in episodes),
+                   "compute": {"decisions": sum(e["decisions"] for e in episodes), "frames": sum(e["frames"] for e in episodes),
+                               "model_calls": sum(e["model_calls"] for e in episodes),
+                               "wall_seconds": round(time.time() - t_eval0, 1)}}
             Path(args.out_dir).mkdir(parents=True, exist_ok=True)
             (Path(args.out_dir) / f"{args.name or 'sampled'}.json").write_text(json.dumps(out, indent=1), encoding="utf-8")
     finally:

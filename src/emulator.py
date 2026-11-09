@@ -93,6 +93,11 @@ class Emulator:
     def frame(self) -> int:
         return self._frame
 
+    def set_frame_counter(self, value: int) -> None:
+        """Restore the wrapper's frame counter after an exact-continuation ``load_state`` (which zeroes it).  This only
+        relabels the counter; it does not advance or alter the emulated machine."""
+        self._frame = int(value)
+
     @property
     def pyboy(self):
         return self._pb

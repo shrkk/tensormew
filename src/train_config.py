@@ -94,6 +94,14 @@ class TrainConfig:
     task_target: str = "falkner"  # bugsy_sparse replaces all legacy reward with transition-only Bugsy milestones
     trace_path: str = ""  # append-only action/reward/transition audit, disabled for legacy runs
     stop_path: str = ""  # cooperative local stop marker checked between PPO updates
+    # Run control (all off by default = the historical behaviour).  ``control_dir`` holds status.json (heartbeat),
+    # RUNNING.lock, snapshots/ (immutable weights at completed-update boundaries) and generations/ (exact-continuation
+    # checkpoints, src.continuation).  With it set and ``stop_path`` empty, STOP is ``<control_dir>/STOP``.
+    control_dir: str = ""
+    snapshot_every: int = 0      # immutable weights-only snapshot every N completed updates (plus update 0); 0 = off
+    generation_every: int = 0    # full continuation checkpoint every N completed updates (always also at stop / budget end); 0 = only at the end
+    min_free_gib: float = 0.0    # halt visibly when free disk on the save volume drops below this (0 = guard off)
+    lr_schedule_updates: int = 0  # global horizon of the lr decay in updates; 0 = start_update + updates (the run's own budget)
     # starts / sharing
     start_states: list[str] = field(default_factory=list)
     stage_balanced: bool = True
@@ -313,6 +321,13 @@ class TrainConfig:
             errs.append(f"lr must be > 0 (got {self.lr})")
         if not 0 < self.lr_end_frac <= 1:
             errs.append(f"lr_end_frac must be in (0, 1] (got {self.lr_end_frac})")
+        for key in ("snapshot_every", "generation_every", "lr_schedule_updates"):
+            if getattr(self, key) < 0:
+                errs.append(f"{key} must be >= 0 (got {getattr(self, key)})")
+        if self.min_free_gib < 0:
+            errs.append(f"min_free_gib must be >= 0 (got {self.min_free_gib})")
+        if (self.snapshot_every or self.generation_every) and not self.control_dir:
+            errs.append("snapshot_every / generation_every need control_dir")
         p = self.ppo
         if not 0 < p.gamma <= 1:
             errs.append(f"ppo.gamma must be in (0, 1] (got {p.gamma})")
