@@ -797,8 +797,9 @@ class EnvWorker:
         self._jitter(data)
         st = self.reader.parse(self.emu.frame)
         # Seed the caught species from the party so the starter does not pay a catch bonus later.
-        from src.bugsy_task import BugsyLedger
+        from src.bugsy_task import BugsyLedger, falkner_goal_eligible
         self.bugsy_ledger = BugsyLedger(st) if self.task_target == "bugsy_sparse" else None
+        self.falkner_eligible = falkner_goal_eligible(st) if self.task_target == 'falkner_strict' else False
         for species_id in getattr(st, "party_species", ()):
             if species_id and species_id != 255:
                 self.caught_counts[species_id] = self.caught_counts.get(species_id, 0) + 1
@@ -1060,6 +1061,9 @@ class EnvWorker:
         # not bootstrap the value; the -15 white-out penalty of this step is the terminal reward).
         bugsy_components = self.bugsy_ledger.step(before, after) if self.bugsy_ledger is not None else None
         bugsy_success = bool(self.bugsy_ledger is not None and self.bugsy_ledger.success)
+        from src.bugsy_task import defeated_falkner
+        falkner_success = (self.task_target == 'falkner_strict' and self.falkner_eligible and defeated_falkner(after))
+        task_success = bugsy_success or falkner_success
         bugsy_outcome = ({"eligible": self.bugsy_ledger.eligible,
                           "earned": sorted(self.bugsy_ledger.earned), "success": bugsy_success}
                          if self.bugsy_ledger is not None else None)
@@ -1068,10 +1072,11 @@ class EnvWorker:
             step_rew = sum(comps.values())
         self.steps += 1
         whiteout = bool(getattr(after, "fainted", False) and not getattr(before, "fainted", False))
-        terminated = (self.terminate_on_whiteout and whiteout) or bugsy_success
+        terminated = (self.terminate_on_whiteout and whiteout) or task_success
         truncated = self.steps >= self.ep_len and not terminated  # time limit, not a real end
         done = truncated or terminated
-        end_reason = "bugsy_success" if bugsy_success else ("whiteout" if terminated else ("time_limit" if truncated else None))
+        end_reason = ("falkner_success" if falkner_success else ("bugsy_success" if bugsy_success else
+                      ("whiteout" if terminated else ("time_limit" if truncated else None))))
         ended_maps = len(self.seen_maps)
         ended_state = self.state_name
         phi_end = _story_phi(after, self.seen_maps)
@@ -1097,7 +1102,7 @@ class EnvWorker:
         screen, ram_vec, st_now = self.get_obs()
         info_out = {
             "task_target": self.task_target,
-            "task_success": bugsy_success,
+            "task_success": task_success,
             "bugsy_ledger": bugsy_outcome,
             "transition": {
                 "frame_before": frame_before, "frame_after": frame_after,

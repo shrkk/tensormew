@@ -299,13 +299,13 @@ class TrainConfig:
 
     def validate(self) -> "TrainConfig":
         errs: list[str] = []
-        if self.task_target not in ("falkner", "bugsy_sparse"):
-            errs.append("task_target must be falkner or bugsy_sparse")
-        if self.task_target == "bugsy_sparse":
+        if self.task_target not in ("falkner", "falkner_strict", "bugsy_sparse"):
+            errs.append("task_target must be falkner, falkner_strict or bugsy_sparse")
+        if self.task_target in ("bugsy_sparse", "falkner_strict"):
             if self.supply_injection or self.escape_assist or self.auto_dialogue:
-                errs.append("bugsy_sparse requires all assistance controls disabled")
+                errs.append("strict tasks require all assistance controls disabled")
             if self.path_progress or self.goal_potential:
-                errs.append("bugsy_sparse requires Falkner path shaping disabled")
+                errs.append("strict tasks require route-oracle path shaping disabled")
         for key in ("envs", "rollout_steps", "updates", "max_steps"):
             if getattr(self, key) < 1:
                 errs.append(f"{key} must be >= 1 (got {getattr(self, key)})")

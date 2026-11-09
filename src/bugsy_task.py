@@ -22,6 +22,14 @@ def defeated_bugsy(state):
     return bool(int(state.badge_bits) & HIVE_BADGE) and _event(state, BUGSY_EVENT)
 
 
+def falkner_goal_eligible(state):
+    return not bool(int(state.badge_bits) & 1) and not _event(state, 'EVENT_BEAT_FALKNER')
+
+
+def defeated_falkner(state):
+    return bool(int(state.badge_bits) & 1) and _event(state, 'EVENT_BEAT_FALKNER')
+
+
 class BugsyLedger:
     """One ledger per episode, initialized only after loading and reset jitter.
 

@@ -17,6 +17,16 @@ def test_pinned_bugsy_gate_and_corrected_event_ids():
     assert {key: EVENT_FLAGS[key] for key in expected} == expected
 
 
+def test_strict_first_gym_requires_specific_badge_and_event_absent_initially():
+    from src.bugsy_task import defeated_falkner, falkner_goal_eligible
+    assert falkner_goal_eligible(state())
+    assert not falkner_goal_eligible(state('EVENT_BEAT_FALKNER'))
+    assert not falkner_goal_eligible(state(badge_bits=1))
+    assert not defeated_falkner(state('EVENT_BEAT_FALKNER', badge_bits=2))
+    assert not defeated_falkner(state(badge_bits=1))
+    assert defeated_falkner(state('EVENT_BEAT_FALKNER', badge_bits=1))
+
+
 def state(*events, badge_bits=0):
     return SimpleNamespace(has_event=lambda name: name in events, badge_bits=badge_bits)
 
