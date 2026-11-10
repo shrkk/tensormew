@@ -38,7 +38,16 @@ def atomic_write_json(path, data) -> None:
     path.parent.mkdir(parents=True, exist_ok=True)
     tmp = path.with_name(path.name + f".{os.getpid()}.tmp")
     tmp.write_text(json.dumps(data, indent=2, default=str), encoding="utf-8")
-    os.replace(tmp, path)
+    # Windows: os.replace raises PermissionError while another process (a status reader, an indexer) has the target open for a
+    # moment.  A status heartbeat must never kill a training run, so retry briefly before giving up.
+    for attempt in range(40):
+        try:
+            os.replace(tmp, path)
+            return
+        except PermissionError:
+            if attempt == 39:
+                raise
+            time.sleep(0.05)
 
 
 def pid_alive(pid: int) -> bool:

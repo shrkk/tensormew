@@ -587,3 +587,27 @@ def test_exact_resume_rejects_changed_config_and_never_falls_back_to_fresh_optim
     (gdir / manifest["components"]["optimizer"]["file"]).unlink()
     with pytest.raises(RuntimeError, match="resume-generation"):
         _run(_tiny_cfg(tmp_path, "strict", 2), monkeypatch, resume_generation="auto")
+
+
+def test_atomic_write_survives_a_transient_permission_error(tmp_path, monkeypatch):
+    # A status reader holding the file for a moment (Windows) must not crash the writer; a persistent failure still raises.
+    import os
+    from src import run_control
+
+    real, calls = os.replace, {"n": 0}
+
+    def flaky(src, dst):
+        calls["n"] += 1
+        if calls["n"] <= 3:
+            raise PermissionError(5, "Access is denied")
+        return real(src, dst)
+
+    monkeypatch.setattr(run_control.os, "replace", flaky)
+    target = tmp_path / "status.json"
+    run_control.atomic_write_json(target, {"a": 1})
+    assert calls["n"] == 4 and json.loads(target.read_text()) == {"a": 1}
+
+    monkeypatch.setattr(run_control.os, "replace", lambda s, d: (_ for _ in ()).throw(PermissionError(5, "denied")))
+    monkeypatch.setattr(run_control.time, "sleep", lambda s: None)
+    with pytest.raises(PermissionError):
+        run_control.atomic_write_json(tmp_path / "other.json", {"b": 2})
